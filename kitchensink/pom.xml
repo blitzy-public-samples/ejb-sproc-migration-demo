@@ -83,13 +83,19 @@
         </dependency>
 
         <!-- PostgreSQL JDBC driver. This is the ONLY dependency that keeps an explicit version
-             (42.7.3, carried over from the EAP build) and the ONLY one whose scope flips
-             provided -> runtime: under EAP the driver was supplied by the server, but the embedded
-             Spring Boot server now needs it on the runtime classpath. -->
+             and the ONLY one whose scope flips provided -> runtime: under EAP the driver was
+             supplied by the server, but the embedded Spring Boot server now needs it on the
+             runtime classpath.
+             Version pinned to 42.7.11 (latest 42.7.x patch line): upgraded from 42.7.3 to remediate
+             CVE-2026-42198 (GHSA-98qh-xjc8-98pq, HIGH) - unbounded PBKDF2 iterations in SCRAM
+             authentication that can cause client-side CPU-exhaustion DoS; affected range
+             [42.2.0, 42.7.11), fixed in 42.7.11. This is a minimal in-line patch bump within the
+             same 42.7.x line (no new version pin introduced), consistent with confirming the driver
+             version at implementation time. -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.7.3</version>
+            <version>42.7.11</version>
             <scope>runtime</scope>
         </dependency>
 
