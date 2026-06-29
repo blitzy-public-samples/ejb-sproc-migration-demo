@@ -16,13 +16,10 @@
  */
 package org.jboss.as.quickstarts.kitchensink.rest;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import jakarta.validation.Valid;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -33,20 +30,19 @@ import org.springframework.web.bind.annotation.RestController;
 
 import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
 import org.jboss.as.quickstarts.kitchensink.model.Member;
-import org.jboss.as.quickstarts.kitchensink.service.MemberNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.service.MemberRegistration;
 
 /**
- * Member REST endpoints — reads and creates rows in the {@code member} table.
+ * Spring MVC {@code @RestController} producing the members REST service: it reads and creates rows in
+ * the {@code member} table under {@code /api/members} (externally {@code /kitchensink/api/members}).
  *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): converted from a JAX-RS
- * {@code @Path("/members") @RequestScoped} resource to a Spring MVC {@code @RestController} based at
- * {@code /api/members} (externally {@code /kitchensink/api/members}). Bean validation moves from a
- * manually-invoked {@code Validator} to {@code @Valid @RequestBody}, whose
- * {@code MethodArgumentNotValidException} is translated to the legacy 400 field-error map by
- * {@link RestExceptionHandler}. The duplicate-email case still returns 409 with
- * {@code {"email":"Email taken"}}, and successful creation still returns HTTP 200 with an empty body.
- * The {@code findById}/{@code findByEmail} repository calls now return {@link java.util.Optional}.</p>
+ * <p>Migrated from the Jakarta EE 10 JAX-RS resource to Spring Boot 3.x. Bean validation is now driven
+ * by {@code @Valid @RequestBody}, and all inline HTTP error-construction has moved to
+ * {@link RestExceptionHandler}: validation failures map to 400 with a {@code {field : message}} map,
+ * and the duplicate-email case (signalled via {@link RestExceptionHandler.DuplicateEmailException})
+ * maps to 409 with body {@code {"email":"Email taken"}}. Successful creation returns HTTP 200 with an
+ * empty body and a missing lookup returns an empty 404, preserving the original contract. The
+ * repository {@code findById}/{@code findByEmail} calls now return {@link java.util.Optional}.</p>
  */
 @RestController
 @RequestMapping("/api/members")
@@ -69,53 +65,50 @@ public class MemberResourceRESTService {
     }
 
     /**
-     * GET /api/members/{id} — looks up a member by numeric ID. The {@code [0-9]+} constraint preserves
-     * the legacy numeric-only path; a missing member yields 404 (via {@link MemberNotFoundException}
-     * mapped in {@link RestExceptionHandler}).
+     * GET /api/members/{id} — looks up a member by id. A present member yields HTTP 200 with the
+     * member serialized as the JSON body; a missing member yields an empty HTTP 404, preserving the
+     * original empty not-found response. Binding {@code id} as a {@link Long} means a non-numeric path
+     * segment produces a framework 400 type-mismatch, preserving the legacy numeric-only intent
+     * without an explicit path regex.
+     *
+     * @param id the numeric member id from the path
+     * @return 200 with the member when found, otherwise an empty 404
      */
-    @GetMapping("/{id:[0-9]+}")
-    public Member lookupMemberById(@PathVariable("id") long id) {
+    @GetMapping("/{id}")
+    public ResponseEntity<Member> lookupMemberById(@PathVariable("id") Long id) {
         return repository.findById(id)
-            .orElseThrow(() -> new MemberNotFoundException("Member not found: " + id));
+            .map(ResponseEntity::ok)
+            .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     /**
      * POST /api/members — creates a new member from the supplied JSON.
      *
-     * <p>Validation is performed by {@code @Valid}; on failure Spring raises
-     * {@code MethodArgumentNotValidException}, which {@link RestExceptionHandler} converts to a 400
-     * response carrying a field-to-message map. A duplicate email returns 409 with
-     * {@code {"email":"Email taken"}}. On success the member is registered and an empty 200 response
-     * is returned (matching the legacy contract the PHP client expects).</p>
+     * <p>Validation is performed by {@code @Valid} before the method body runs; on failure Spring
+     * raises a {@code MethodArgumentNotValidException}, which {@link RestExceptionHandler} converts to
+     * a 400 response carrying a field-to-message map. Because {@code @Valid} runs first, validation
+     * 400s take precedence over the 409 duplicate-email check below — preserving the original
+     * ordering (validate, then check email uniqueness).</p>
      *
-     * @param member the member to create (validated)
-     * @return 200 (empty) on success, or 409 with an {@code email} message if the email is taken
+     * <p>The email uniqueness constraint (the {@code @UniqueConstraint(columnNames = "email")} on
+     * {@link Member}) is enforced inline: if a member with the same email already exists,
+     * {@link RestExceptionHandler.DuplicateEmailException} is thrown and the advice maps it to 409
+     * with the exact body {@code {"email":"Email taken"}}. On success the member is registered and an
+     * empty HTTP 200 response is returned — the legacy contract the PHP storefront and
+     * {@code RemoteMemberRegistrationIT} depend on.</p>
+     *
+     * @param member the member to create (validated by {@code @Valid})
+     * @return an empty HTTP 200 on success
      */
     @PostMapping
-    public ResponseEntity<?> createMember(@Valid @RequestBody Member member) {
-        // Enforce the email uniqueness constraint (the @UniqueConstraint on Member.email). This is
-        // the legacy "ValidationException -> 409 {email: Email taken}" behavior, kept inline rather
-        // than as a global mapping because no duplicate-email exception type is defined.
-        if (emailAlreadyExists(member.getEmail())) {
-            Map<String, String> responseObj = new HashMap<>();
-            responseObj.put("email", "Email taken");
-            return ResponseEntity.status(HttpStatus.CONFLICT).body(responseObj);
+    public ResponseEntity<Void> createMember(@Valid @RequestBody Member member) {
+        if (repository.findByEmail(member.getEmail()).isPresent()) {
+            throw new RestExceptionHandler.DuplicateEmailException();
         }
 
         registration.register(member);
 
         // Legacy contract: successful creation returns 200 with an empty body.
         return ResponseEntity.ok().build();
-    }
-
-    /**
-     * Checks whether a member with the given email already exists. This is the application-level
-     * guard for the {@code @UniqueConstraint(columnNames = "email")} on {@link Member}.
-     *
-     * @param email the email to check
-     * @return {@code true} if a member with that email already exists
-     */
-    public boolean emailAlreadyExists(String email) {
-        return repository.findByEmail(email).isPresent();
     }
 }

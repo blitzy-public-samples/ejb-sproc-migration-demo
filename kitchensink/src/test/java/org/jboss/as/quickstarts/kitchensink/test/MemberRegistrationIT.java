@@ -18,42 +18,37 @@ package org.jboss.as.quickstarts.kitchensink.test;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+import java.util.UUID;
+
+import org.jboss.as.quickstarts.kitchensink.model.Member;
+import org.jboss.as.quickstarts.kitchensink.service.MemberRegistration;
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
 
-import org.jboss.as.quickstarts.kitchensink.model.Member;
-import org.jboss.as.quickstarts.kitchensink.service.MemberRegistration;
-
-/**
- * Integration test for {@link MemberRegistration}.
- *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): rewritten from Arquillian/JUnit 4 to
- * {@code @SpringBootTest} + JUnit 5, with the collaborator {@code @Autowired}. The test is
- * {@code @Transactional} (rolled back), so {@code jane@mailinator.com} is NOT committed here — that email
- * is committed by {@link RemoteMemberRegistrationIT} (which performs a real HTTP POST and therefore cannot
- * roll back). Because Failsafe runs the integration tests in alphabetical order, this test (M) runs before
- * the remote test (R), so the rollback prevents a duplicate-email collision in the shared test database.</p>
- */
 @SpringBootTest
 @ActiveProfiles("test")
 @Transactional
-class MemberRegistrationIT {
+public class MemberRegistrationIT {
+
+    private static final Logger log = LoggerFactory.getLogger(MemberRegistrationIT.class);
 
     @Autowired
     private MemberRegistration memberRegistration;
 
     @Test
-    void testRegister() {
+    public void testRegister() {
         Member newMember = new Member();
         newMember.setName("Jane Doe");
-        newMember.setEmail("jane@mailinator.com");
+        newMember.setEmail("jane-" + UUID.randomUUID() + "@mailinator.com");
         newMember.setPhoneNumber("2125551234");
-
         memberRegistration.register(newMember);
-
-        assertNotNull(newMember.getId(), "Member should be persisted with a generated id");
+        assertNotNull(newMember.getId());
+        log.info(newMember.getName() + " was persisted with id " + newMember.getId());
     }
+
 }

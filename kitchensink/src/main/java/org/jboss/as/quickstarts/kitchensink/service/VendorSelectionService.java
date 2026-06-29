@@ -125,9 +125,16 @@ public class VendorSelectionService {
     }
 
     /**
-     * Computes the Source-A benefit score for a candidate vendor. Division by zero is guarded:
-     * a non-positive or null {@code avgShippingDays} contributes no shipping-speed bonus, and a
-     * null {@code fulfillmentRating} contributes no fulfillment bonus.
+     * Computes the Source-A benefit score for a candidate vendor:
+     * <pre>
+     *   score = (1 / normalizedPrice) * 0.60
+     *         + (fulfillmentRating / 5.0)  * 0.30
+     *         + (1 / avgShippingDays)      * 0.10        -- highest score wins
+     * </pre>
+     * Division by zero is guarded: {@code avgShippingDays} is clamped to {@code >= 1} — a null or
+     * non-positive value is treated as 1 day via {@code Math.max(days, 1)}, so the fastest/unknown
+     * shipping earns the full speed bonus and the {@code (1 / avgShippingDays)} term never divides
+     * by zero. A null {@code fulfillmentRating} contributes no fulfillment bonus.
      */
     private double score(double candidatePrice, double minPrice, Vendor vendor) {
         double normalizedPrice = (candidatePrice == 0.0) ? 1.0 : candidatePrice / minPrice;
@@ -137,9 +144,11 @@ public class VendorSelectionService {
             ? 0.0 : vendor.getFulfillmentRating().doubleValue();
         double fulfillmentTerm = (fulfillment / 5.0) * 0.30;
 
+        // Divide-by-zero GUARD (binding rule): clamp avg_shipping_days to >= 1 (null -> 1) via
+        // Math.max(days, 1), so the Source-A speed term (1 / avgShippingDays) * 0.10 is always safe.
         Integer avgShippingDays = vendor.getAvgShippingDays();
-        double shippingTerm = (avgShippingDays != null && avgShippingDays > 0)
-            ? (1.0 / avgShippingDays) * 0.10 : 0.0;
+        int days = (avgShippingDays == null) ? 1 : Math.max(avgShippingDays, 1);
+        double shippingTerm = (1.0 / days) * 0.10;
 
         return priceTerm + fulfillmentTerm + shippingTerm;
     }
