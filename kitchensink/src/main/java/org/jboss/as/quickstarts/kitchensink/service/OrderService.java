@@ -5,8 +5,10 @@ import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderDraftItemRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderItemRepository;
@@ -19,29 +21,37 @@ import org.jboss.as.quickstarts.kitchensink.model.OrderItem;
 import org.jboss.as.quickstarts.kitchensink.model.Product;
 
 /**
- * OrderService — orchestrates the full order lifecycle, re-implementing the {@code process_order}
- * PL/pgSQL stored procedure in Java.
+ * OrderService — embodies the process_order stored procedure (db/02_stored_procedures.sql L196-290).
  *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): formerly a CDI
- * {@code @ApplicationScoped} bean whose {@code submitOrder()} delegated to a native
- * {@code SELECT process_order(...)} query while {@code previewOrder()} re-implemented the same
- * logic in Java — a documented dual-path maintenance hazard. It is now a Spring {@code @Service}
- * with a single private {@link #orchestrateOrder} that performs all read-only computation
- * (vendor selection, pricing, line totals, discount, shipping, totals). Both paths share it:
- * {@code previewOrder()} maps the result without persisting; {@code submitOrder()} is
- * {@code @Transactional} and additionally persists the order, persists order items, increments the
- * member's total spend, and clears the draft cart.</p>
+ * Migrated from CDI @ApplicationScoped to Spring @Service. The native "SELECT process_order(...)" call is
+ * removed: submit is fully reimplemented in Java. previewOrder() and submitOrder() now share one private
+ * orchestrateOrder() that performs ALL read-only computation (vendor selection, pricing, line totals,
+ * discount, shipping, totals); they differ only in persistence (AAP §0.6.4). EntityManager is gone — drafts
+ * use OrderDraftItemRepository. Dependency graph is acyclic (PricingService is a stateless shared leaf).
  *
- * <p>Side-effect preservation: {@code orchestrateOrder} invokes {@link DiscountService#calculateDiscount}
- * which writes exactly one {@code discount_audit} row — preserving today's behavior where both the
- * preview path and the submit path each write one audit row (never dropped from preview, never
- * double-counted in submit).</p>
+ * MIGRATION NOTES (JBoss EAP 8 / Jakarta EE 10 -> Spring Boot 3.x):
+ * <ul>
+ *   <li>CDI {@code @ApplicationScoped} -> Spring {@code @Service}; CDI {@code @Inject} field injection ->
+ *       constructor injection of nine immutable {@code final} collaborators (no {@code @Autowired} needed
+ *       for a single constructor).</li>
+ *   <li>{@code jakarta.transaction.Transactional} -> {@code org.springframework.transaction.annotation.Transactional},
+ *       declared on the write methods ({@code addToCart}, {@code removeFromCart}, {@code submitOrder}).
+ *       {@code previewOrder} is intentionally NOT transactional so its single {@code discount_audit} write
+ *       commits independently, mirroring the legacy behavior; the private {@code orchestrateOrder} is not
+ *       annotated either (it carries no transactional boundary of its own).</li>
+ *   <li>{@code EntityManager} (persist / JPQL / native {@code SELECT process_order(...)}) -> Spring Data
+ *       repositories. There is NO {@code EntityManager}, NO JPQL, and NO stored-procedure invocation: the
+ *       full ordering pipeline now lives in Java.</li>
+ *   <li>Preview/submit dual-path unification (AAP §0.6.4): the former hazard where {@code previewOrder()}
+ *       re-implemented the logic while {@code submitOrder()} delegated to {@code process_order} is removed.
+ *       A single {@code orchestrateOrder} is the source of truth; {@code submitOrder} adds persistence.</li>
+ * </ul>
  */
 @Service
 public class OrderService {
 
-    private final PricingService pricingService;
     private final VendorSelectionService vendorSelectionService;
+    private final PricingService pricingService;
     private final DiscountService discountService;
     private final ShippingService shippingService;
     private final OrderRepository orderRepository;
@@ -50,8 +60,15 @@ public class OrderService {
     private final OrderDraftItemRepository orderDraftItemRepository;
     private final ProductRepository productRepository;
 
-    public OrderService(PricingService pricingService,
-                        VendorSelectionService vendorSelectionService,
+    /**
+     * Constructor injection of the nine collaborators (replaces CDI {@code @Inject} field injection).
+     * A single constructor is wired by Spring automatically, so no {@code @Autowired} is required. The
+     * dependency graph is acyclic: {@link PricingService} is a stateless shared leaf depending only on
+     * repositories (AAP §0.6.3), so it is safely shared with {@link DiscountService} and
+     * {@link VendorSelectionService}.
+     */
+    public OrderService(VendorSelectionService vendorSelectionService,
+                        PricingService pricingService,
                         DiscountService discountService,
                         ShippingService shippingService,
                         OrderRepository orderRepository,
@@ -59,8 +76,8 @@ public class OrderService {
                         MemberRepository memberRepository,
                         OrderDraftItemRepository orderDraftItemRepository,
                         ProductRepository productRepository) {
-        this.pricingService = pricingService;
         this.vendorSelectionService = vendorSelectionService;
+        this.pricingService = pricingService;
         this.discountService = discountService;
         this.shippingService = shippingService;
         this.orderRepository = orderRepository;
@@ -79,6 +96,7 @@ public class OrderService {
      */
     @Transactional
     public void addToCart(Long memberId, Long productId, int quantity) {
+        // Preserve current behavior: insert a new draft row (no upsert). em.persist -> repository.save.
         OrderDraftItem item = new OrderDraftItem();
         item.setMemberId(memberId);
         item.setProductId(productId);
@@ -98,137 +116,88 @@ public class OrderService {
     }
 
     /**
-     * Performs all read-only order computation shared by {@link #previewOrder} and
-     * {@link #submitOrder}: for each draft line it selects the best vendor, prices the line,
-     * accumulates the subtotal and total weight, then applies the member discount (which writes
-     * one {@code discount_audit} row) and shipping, and computes the final total.
-     *
-     * <p>This is the single source of truth that eliminates the former preview/submit drift.
-     * It performs no persistence, no member update, and no draft clearing.</p>
-     */
-    private OrchestrationResult orchestrateOrder(Long memberId, String destinationZip, boolean expedite) {
-        List<OrderDraftItem> draftItems = orderDraftItemRepository.findByMemberId(memberId);
-
-        BigDecimal subtotal = BigDecimal.ZERO;
-        BigDecimal totalWeight = BigDecimal.ZERO;
-        List<LineItemPreview> lineItems = new ArrayList<>();
-
-        for (OrderDraftItem draftItem : draftItems) {
-            Long productId = draftItem.getProductId();
-            int quantity = draftItem.getQuantity();
-
-            Long vendorId = vendorSelectionService.selectBestVendor(productId, quantity);
-            if (vendorId == null) {
-                continue;
-            }
-
-            BigDecimal unitPrice = pricingService.calculatePrice(productId, vendorId, quantity);
-            BigDecimal lineTotal = unitPrice.multiply(BigDecimal.valueOf(quantity))
-                .setScale(2, RoundingMode.HALF_UP);
-            subtotal = subtotal.add(lineTotal);
-
-            // Accumulate weight (weight_lbs may be null -> treated as 0), mirroring process_order
-            // which joined products for weight_lbs and used COALESCE(weight_lbs, 0).
-            Product product = productRepository.findById(productId).orElse(null);
-            BigDecimal weightLbs = (product != null && product.getWeightLbs() != null)
-                ? product.getWeightLbs() : BigDecimal.ZERO;
-            totalWeight = totalWeight.add(weightLbs.multiply(BigDecimal.valueOf(quantity)));
-
-            lineItems.add(new LineItemPreview(productId, vendorId, quantity, unitPrice, lineTotal));
-        }
-
-        BigDecimal discountAmount = discountService.calculateDiscount(memberId, subtotal);
-        BigDecimal shippingCost = shippingService.calculateShipping(destinationZip, totalWeight, expedite);
-        BigDecimal total = subtotal.subtract(discountAmount).add(shippingCost);
-
-        return new OrchestrationResult(subtotal, discountAmount, shippingCost, total, lineItems);
-    }
-
-    /**
      * Previews the order total without committing it. Delegates entirely to the shared
-     * {@link #orchestrateOrder} and maps the result to an {@link OrderPreview}; performs no
-     * persistence.
+     * {@link #orchestrateOrder}; performs NO {@code Order}/{@code OrderItem} persistence, NO member
+     * update, and NO draft clearing.
+     *
+     * <p>Not {@code @Transactional}: the single {@code discount_audit} write still happens (via
+     * {@code orchestrateOrder} -> {@link DiscountService#calculateDiscount}) and commits independently,
+     * preserving today's behavior.</p>
      *
      * @param memberId        the member ID
      * @param destinationZip  the destination ZIP code
      * @param expedite        whether expedited shipping is requested
-     * @return                an OrderPreview with full cost breakdown
+     * @return                an {@link OrderPreview} with the full cost breakdown
      */
     public OrderPreview previewOrder(Long memberId, String destinationZip, boolean expedite) {
-        OrchestrationResult r = orchestrateOrder(memberId, destinationZip, expedite);
-        return new OrderPreview(r.subtotal, r.discountAmount, r.shippingCost, r.total, r.items);
+        return orchestrateOrder(memberId, destinationZip, expedite);
     }
 
     /**
-     * Submits the order: validates the member and cart, runs the shared orchestration, then
-     * persists the {@code CONFIRMED} order and its items, increments the member's
-     * {@code total_spend}, and clears the draft cart — all atomically.
+     * Submits the order: runs the shared orchestration, then persists the {@code CONFIRMED} order and its
+     * items, increments the member's {@code total_spend} (and stamps {@code tier_updated_at}), and clears
+     * the draft cart — all atomically. Does NOT call any stored procedure and does NOT write a second
+     * audit row (the single audit write happens inside {@link #orchestrateOrder}).
      *
      * @param memberId        the member ID
      * @param destinationZip  the destination ZIP code
      * @param expedite        whether expedited shipping is requested
      * @return                the new order ID
-     * @throws MemberNotFoundException if the member does not exist (≙ {@code P0003})
-     * @throws EmptyCartException      if the member's draft cart is empty (≙ {@code P0004})
+     * @throws MemberNotFoundException if the member does not exist (≙ {@code process_order} ERRCODE P0003)
+     * @throws EmptyCartException      if the member's draft cart is empty (≙ {@code process_order} ERRCODE P0004)
      */
     @Transactional
     public Long submitOrder(Long memberId, String destinationZip, boolean expedite) {
-        // Validate member exists (≙ process_order P0003).
-        if (!memberRepository.existsById(memberId)) {
-            throw new MemberNotFoundException("Member not found: " + memberId);
-        }
-        // Validate cart is not empty (≙ process_order P0004).
-        if (orderDraftItemRepository.findByMemberId(memberId).isEmpty()) {
-            throw new EmptyCartException("Cart is empty for member " + memberId);
-        }
+        OrderPreview computed = orchestrateOrder(memberId, destinationZip, expedite);
 
-        OrchestrationResult r = orchestrateOrder(memberId, destinationZip, expedite);
-
-        // Persist the confirmed order.
+        // Persist the CONFIRMED order.
         Order order = new Order();
         order.setMemberId(memberId);
         order.setStatus("CONFIRMED");
-        order.setSubtotal(r.subtotal);
-        order.setDiscountAmount(r.discountAmount);
-        order.setShippingCost(r.shippingCost);
-        order.setTotal(r.total);
+        order.setSubtotal(computed.getSubtotal());
+        order.setDiscountAmount(computed.getDiscountAmount());
+        order.setShippingCost(computed.getShippingCost());
+        order.setTotal(computed.getTotal());
         order.setCreatedAt(LocalDateTime.now());
-        Order savedOrder = orderRepository.save(order);
+        Order saved = orderRepository.save(order);
+        Long orderId = saved.getId();
 
-        // Persist order items (entities use plain Long FKs with no cascade -> persist explicitly).
-        for (LineItemPreview li : r.items) {
-            OrderItem item = new OrderItem();
-            item.setOrderId(savedOrder.getId());
-            item.setProductId(li.getProductId());
-            item.setVendorId(li.getVendorId());
-            item.setQuantity(li.getQuantity());
-            item.setUnitPrice(li.getUnitPrice());
-            item.setLineTotal(li.getLineTotal());
-            orderItemRepository.save(item);
+        // Persist OrderItems EXPLICITLY (no cascade exists; FKs are plain Long).
+        List<OrderItem> items = new ArrayList<>();
+        for (LineItemPreview line : computed.getItems()) {
+            OrderItem oi = new OrderItem();
+            oi.setOrderId(orderId);
+            oi.setProductId(line.getProductId());
+            oi.setVendorId(line.getVendorId());
+            oi.setQuantity(line.getQuantity());
+            oi.setUnitPrice(line.getUnitPrice());
+            oi.setLineTotal(line.getLineTotal());
+            items.add(oi);
         }
+        orderItemRepository.saveAll(items);
 
         // Increment member total_spend and stamp tier_updated_at.
         Member member = memberRepository.findById(memberId)
             .orElseThrow(() -> new MemberNotFoundException("Member not found: " + memberId));
-        BigDecimal currentSpend = (member.getTotalSpend() != null) ? member.getTotalSpend() : BigDecimal.ZERO;
-        member.setTotalSpend(currentSpend.add(r.total));
+        BigDecimal currentSpend = member.getTotalSpend() != null ? member.getTotalSpend() : BigDecimal.ZERO;
+        member.setTotalSpend(currentSpend.add(computed.getTotal()));
         member.setTierUpdatedAt(LocalDateTime.now());
         memberRepository.save(member);
 
         // Clear the draft cart.
         orderDraftItemRepository.deleteByMemberId(memberId);
 
-        return savedOrder.getId();
+        return orderId;
     }
 
     /**
-     * Returns a single order by ID, or {@code null} if not found (the REST layer maps the null
-     * case to HTTP 404).
+     * Returns a single order by ID, or {@code null} if not found.
      *
      * @param orderId  the order ID
-     * @return         the Order entity, or {@code null}
+     * @return         the {@link Order} entity, or {@code null} when absent
      */
     public Order getOrder(Long orderId) {
+        // findById now returns Optional; map empty -> null to preserve the REST null -> 404 contract.
         return orderRepository.findById(orderId).orElse(null);
     }
 
@@ -236,41 +205,69 @@ public class OrderService {
      * Returns the order history for a member, sorted by creation date descending.
      *
      * @param memberId  the member ID
-     * @return          list of orders sorted by creation date descending
+     * @return          list of orders sorted by {@code created_at} descending
      */
     public List<Order> getOrderHistory(Long memberId) {
         return orderRepository.findByMemberIdOrderByCreatedAtDesc(memberId);
     }
 
-    // -----------------------------------------------------------------------
-    // Result + view types
-    // -----------------------------------------------------------------------
+    // ---- Unified read-only computation shared by preview and submit (AAP §0.6.4) ----
+    private OrderPreview orchestrateOrder(Long memberId, String destinationZip, boolean expedite) {
+        // 1. Member must exist (SP: NOT FOUND => RAISE 'P0003').
+        memberRepository.findById(memberId)
+            .orElseThrow(() -> new MemberNotFoundException("Member not found: " + memberId));
 
-    /** Immutable carrier for the computed values produced by {@link #orchestrateOrder}. */
-    private static final class OrchestrationResult {
-        private final BigDecimal subtotal;
-        private final BigDecimal discountAmount;
-        private final BigDecimal shippingCost;
-        private final BigDecimal total;
-        private final List<LineItemPreview> items;
-
-        private OrchestrationResult(BigDecimal subtotal, BigDecimal discountAmount,
-                BigDecimal shippingCost, BigDecimal total, List<LineItemPreview> items) {
-            this.subtotal = subtotal;
-            this.discountAmount = discountAmount;
-            this.shippingCost = shippingCost;
-            this.total = total;
-            this.items = items;
+        // 2. Draft cart must be non-empty (SP: empty => RAISE 'P0004').
+        List<OrderDraftItem> draftItems = orderDraftItemRepository.findByMemberId(memberId);
+        if (draftItems.isEmpty()) {
+            throw new EmptyCartException("Cart is empty for member " + memberId);
         }
+
+        // 3. Per draft line: best vendor -> unit price -> line total; accumulate subtotal + weight.
+        BigDecimal subtotal = BigDecimal.ZERO;
+        BigDecimal totalWeight = BigDecimal.ZERO;
+        List<LineItemPreview> lineItems = new ArrayList<>();
+        for (OrderDraftItem draftItem : draftItems) {
+            Long productId = draftItem.getProductId();
+            int quantity = draftItem.getQuantity();
+
+            Long vendorId = vendorSelectionService.selectBestVendor(productId, quantity);
+            if (vendorId == null) {
+                continue; // no vendor with stock; skip (preserves current preview behavior)
+            }
+            BigDecimal unitPrice = pricingService.calculatePrice(productId, vendorId, quantity);
+            BigDecimal lineTotal = unitPrice.multiply(BigDecimal.valueOf(quantity)).setScale(2, RoundingMode.HALF_UP);
+            subtotal = subtotal.add(lineTotal);
+
+            // COALESCE(weight_lbs, 0) * qty (Product weight is nullable).
+            BigDecimal unitWeight = productRepository.findById(productId)
+                .map(Product::getWeightLbs)
+                .orElse(BigDecimal.ZERO);
+            if (unitWeight == null) {
+                unitWeight = BigDecimal.ZERO;
+            }
+            totalWeight = totalWeight.add(unitWeight.multiply(BigDecimal.valueOf(quantity)));
+
+            lineItems.add(new LineItemPreview(productId, vendorId, quantity, unitPrice, lineTotal));
+        }
+
+        // 4. Discount (writes EXACTLY ONE discount_audit row via DiscountService).
+        BigDecimal discountAmount = discountService.calculateDiscount(memberId, subtotal);
+        // 5. Shipping on accumulated weight.
+        BigDecimal shippingCost = shippingService.calculateShipping(destinationZip, totalWeight, expedite);
+        // 6. total = subtotal - discount + shipping.
+        BigDecimal total = subtotal.subtract(discountAmount).add(shippingCost).setScale(2, RoundingMode.HALF_UP);
+
+        return new OrderPreview(subtotal, discountAmount, shippingCost, total, lineItems);
     }
 
+    // ---- Inner classes (PRESERVE EXACTLY — REST serializes these to JSON) ----
     public static class OrderPreview {
         private final BigDecimal subtotal;
         private final BigDecimal discountAmount;
         private final BigDecimal shippingCost;
         private final BigDecimal total;
         private final List<LineItemPreview> items;
-
         public OrderPreview(BigDecimal subtotal, BigDecimal discountAmount,
                 BigDecimal shippingCost, BigDecimal total, List<LineItemPreview> items) {
             this.subtotal = subtotal;
@@ -279,7 +276,6 @@ public class OrderService {
             this.total = total;
             this.items = items;
         }
-
         public BigDecimal getSubtotal() { return subtotal; }
         public BigDecimal getDiscountAmount() { return discountAmount; }
         public BigDecimal getShippingCost() { return shippingCost; }
@@ -293,7 +289,6 @@ public class OrderService {
         private final int quantity;
         private final BigDecimal unitPrice;
         private final BigDecimal lineTotal;
-
         public LineItemPreview(Long productId, Long vendorId, int quantity,
                 BigDecimal unitPrice, BigDecimal lineTotal) {
             this.productId = productId;
@@ -302,7 +297,6 @@ public class OrderService {
             this.unitPrice = unitPrice;
             this.lineTotal = lineTotal;
         }
-
         public Long getProductId() { return productId; }
         public Long getVendorId() { return vendorId; }
         public int getQuantity() { return quantity; }
