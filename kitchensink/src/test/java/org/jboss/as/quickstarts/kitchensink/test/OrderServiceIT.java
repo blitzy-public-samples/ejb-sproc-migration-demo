@@ -7,42 +7,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 
+import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
+import org.jboss.as.quickstarts.kitchensink.data.OrderDraftItemRepository;
+import org.jboss.as.quickstarts.kitchensink.data.OrderRepository;
+import org.jboss.as.quickstarts.kitchensink.model.Order;
+import org.jboss.as.quickstarts.kitchensink.service.OrderService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.transaction.annotation.Transactional;
-
-import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
-import org.jboss.as.quickstarts.kitchensink.data.OrderDraftItemRepository;
-import org.jboss.as.quickstarts.kitchensink.data.OrderRepository;
-import org.jboss.as.quickstarts.kitchensink.model.Member;
-import org.jboss.as.quickstarts.kitchensink.model.Order;
-import org.jboss.as.quickstarts.kitchensink.service.OrderService;
 
 /**
- * Integration tests for {@link OrderService} (the unified {@code orchestrateOrder} path that replaces
- * the legacy {@code process_order} delegation).
- *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): rewritten from Arquillian/JUnit 4 to
- * {@code @SpringBootTest} + JUnit 5. The class is {@code @Transactional} so every test rolls back at the
- * end — this isolates the tests, protects the externally-seeded member 2 (Robert Torres, SILVER) from
- * permanent {@code total_spend} changes or leftover orders, and replaces the legacy manual
- * {@code UserTransaction} bookkeeping. A {@code @BeforeEach} clears member 2's draft cart for a clean
- * starting state. Data is read back through the Spring Data repositories within the same transaction.</p>
+ * Integration test for {@link OrderService} (migrated from Arquillian/JUnit 4 to
+ * Spring Boot @SpringBootTest / JUnit 5). NOT transactional: testMemberTotalSpendIncreasesAfterOrder
+ * must observe submitOrder's committed total_spend on a fresh read. Isolation is provided by
+ * the @BeforeEach/@AfterEach draft-cart cleanup for member 2.
  */
 @SpringBootTest
 @ActiveProfiles("test")
-@Transactional
-class OrderServiceIT {
+public class OrderServiceIT {
 
-    /** Member 2 (Robert Torres, SILVER) is used to avoid conflicting with other tests. */
+    // Use member 2 (Robert Torres, SILVER) to avoid conflicting with other tests
     private static final Long TEST_MEMBER_ID = 2L;
-    private static final String TEST_ZIP = "27601";
+    private static final String TEST_ZIP     = "27601";
 
     @Autowired
     private OrderService orderService;
+
+    @Autowired
+    private OrderDraftItemRepository orderDraftItemRepository;
 
     @Autowired
     private OrderRepository orderRepository;
@@ -50,31 +45,31 @@ class OrderServiceIT {
     @Autowired
     private MemberRepository memberRepository;
 
-    @Autowired
-    private OrderDraftItemRepository orderDraftItemRepository;
-
     @BeforeEach
-    void cleanCart() {
+    public void cleanCartBefore() {
+        orderDraftItemRepository.deleteByMemberId(TEST_MEMBER_ID);
+    }
+
+    @AfterEach
+    public void cleanCartAfter() {
         orderDraftItemRepository.deleteByMemberId(TEST_MEMBER_ID);
     }
 
     /**
-     * Test 1: {@code addToCart} persists a new {@code order_draft_items} row.
+     * Test 1: addToCart() should persist a new order_draft_items row.
      */
     @Test
-    void testAddToCartInsertsRow() {
+    public void testAddToCartInsertsRow() {
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
-
-        long count = orderDraftItemRepository.findByMemberId(TEST_MEMBER_ID).size();
-        assertTrue(count >= 1, "Cart should have at least 1 item after addToCart()");
+        assertTrue(orderDraftItemRepository.findByMemberId(TEST_MEMBER_ID).size() >= 1,
+            "Cart should have at least 1 item after addToCart()");
     }
 
     /**
-     * Test 2: {@code previewOrder} on a non-empty cart returns positive subtotal and total and a
-     * non-empty item list.
+     * Test 2: previewOrder() on a non-empty cart should return a non-zero total.
      */
     @Test
-    void testPreviewOrderReturnsNonZeroTotal() {
+    public void testPreviewOrderReturnsNonZeroTotal() {
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
         orderService.addToCart(TEST_MEMBER_ID, 3L, 10);
 
@@ -87,48 +82,45 @@ class OrderServiceIT {
     }
 
     /**
-     * Test 3: {@code submitOrder} creates a CONFIRMED order record for the member.
+     * Test 3: submitOrder() should create a CONFIRMED order record.
      */
     @Test
-    void testSubmitOrderCreatesConfirmedOrder() {
+    public void testSubmitOrderCreatesConfirmedOrder() {
         orderService.addToCart(TEST_MEMBER_ID, 2L, 3);
 
         Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
         assertNotNull(orderId, "Order ID should not be null after submitOrder()");
 
-        Order order = orderRepository.findById(orderId).orElse(null);
-        assertNotNull(order, "Order entity should exist in DB");
+        Order order = orderRepository.findById(orderId).orElseThrow();
         assertEquals("CONFIRMED", order.getStatus(), "Order status should be CONFIRMED");
         assertEquals(TEST_MEMBER_ID, order.getMemberId(), "Order member ID should match");
     }
 
     /**
-     * Test 4: {@code submitOrder} clears the member's draft cart.
+     * Test 4: submitOrder() should clear the member's draft cart.
      */
     @Test
-    void testSubmitOrderClearsDraftCart() {
+    public void testSubmitOrderClearsDraftCart() {
         orderService.addToCart(TEST_MEMBER_ID, 1L, 2);
         orderService.addToCart(TEST_MEMBER_ID, 4L, 1);
 
         orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
 
-        long remaining = orderDraftItemRepository.findByMemberId(TEST_MEMBER_ID).size();
-        assertEquals(0L, remaining, "Draft cart should be empty after submitOrder()");
+        assertEquals(0, orderDraftItemRepository.findByMemberId(TEST_MEMBER_ID).size(),
+            "Draft cart should be empty after submitOrder()");
     }
 
     /**
-     * Test 5: {@code submitOrder} increases the member's {@code total_spend}.
+     * Test 5: submitOrder() should increase the member's total_spend.
      */
     @Test
-    void testMemberTotalSpendIncreasesAfterOrder() {
-        Member memberBefore = memberRepository.findById(TEST_MEMBER_ID).orElseThrow();
-        BigDecimal spendBefore = memberBefore.getTotalSpend();
+    public void testMemberTotalSpendIncreasesAfterOrder() {
+        BigDecimal spendBefore = memberRepository.findById(TEST_MEMBER_ID).orElseThrow().getTotalSpend();
 
         orderService.addToCart(TEST_MEMBER_ID, 5L, 2);
         orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
 
-        Member memberAfter = memberRepository.findById(TEST_MEMBER_ID).orElseThrow();
-        BigDecimal spendAfter = memberAfter.getTotalSpend();
+        BigDecimal spendAfter = memberRepository.findById(TEST_MEMBER_ID).orElseThrow().getTotalSpend();
 
         assertTrue(spendAfter.compareTo(spendBefore) > 0,
             "total_spend should increase after submitOrder()");
