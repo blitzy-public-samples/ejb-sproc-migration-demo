@@ -4,123 +4,141 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!--
+        MIGRATION (JBoss EAP 8 / Jakarta EE 10  ->  Spring Boot 3.x):
+        The Spring Boot parent replaces the former JBoss EAP quickstart aggregator parent
+        (org.jboss.as.quickstarts:jboss-eap-quickstart-parent) AND the jboss-eap-ee-with-tools
+        BOM import. spring-boot-starter-parent is now the single source of truth for dependency
+        and plugin versions. The empty <relativePath/> is required so Maven resolves the parent
+        from the repository (local ~/.m2 / Maven Central) instead of walking up to the repository
+        root aggregator pom.xml (which remains a JBoss aggregator and is out of scope here).
+        Requires Java 17+.
+    -->
     <parent>
-        <groupId>org.jboss.as.quickstarts</groupId>
-        <artifactId>jboss-eap-quickstart-parent</artifactId>
-        <version>6.0.0.redhat-00001</version>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
     </parent>
 
+    <!--
+        Maven coordinates retained from the original module (Minimal Change Clause): the
+        artifactId and version are unchanged and no module rename was requested. groupId is now
+        declared explicitly because spring-boot-starter-parent no longer supplies the
+        org.jboss.as.quickstarts group that the JBoss aggregator parent previously contributed.
+    -->
+    <groupId>org.jboss.as.quickstarts</groupId>
     <artifactId>kitchensink</artifactId>
     <version>8.0.0.GA</version>
-    <packaging>war</packaging>
+    <!-- Packaging war -> jar: the module is now a standalone, executable Spring Boot JAR
+         (java -jar target/kitchensink-*.jar), not a WAR deployed onto JBoss EAP. -->
+    <packaging>jar</packaging>
 
     <name>JBoss EAP Quickstart: kitchensink (Net32 Augmentation)</name>
-    <description>Net32 dental supply augmentation of the kitchensink quickstart</description>
+    <description>Net32 dental supply augmentation of the kitchensink quickstart, migrated to Spring Boot 3.x</description>
 
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.jboss.bom</groupId>
-                <artifactId>jboss-eap-ee-with-tools</artifactId>
-                <version>8.0.0.GA-redhat-00009</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
+    <!--
+        Java 17 target: the prompt's floor ("Java 17+"), the Spring Boot 3 minimum, and the
+        JBoss EAP 8 baseline. spring-boot-starter-parent reads the java.version property to drive
+        the compiler release level, so no explicit maven-compiler-plugin configuration is needed.
+        UTF-8 source/resource encoding is also configured by the parent.
+    -->
+    <properties>
+        <java.version>17</java.version>
+    </properties>
 
+    <!--
+        No <dependencyManagement> block is declared: spring-boot-starter-parent is itself the BOM
+        and manages the versions of every Spring Boot starter below as well as the Testcontainers
+        BOM. The former import of org.jboss.bom:jboss-eap-ee-with-tools has been removed entirely.
+
+        Removed from the EAP build (now supplied transitively by the starters, or obsolete under
+        Spring): the six provided Jakarta APIs (jakarta.enterprise.cdi-api, jakarta.annotation-api,
+        jakarta.ws.rs-api, jakarta.persistence-api, jakarta.validation-api, jakarta.ejb-api),
+        org.hibernate.validator:hibernate-validator, org.jboss.arquillian.junit:arquillian-junit-container,
+        and junit:junit (JUnit 4).
+    -->
     <dependencies>
-        <!-- Jakarta EE APIs (provided by EAP) -->
+        <!-- Web layer: embedded Tomcat + Spring MVC, backing the @RestController endpoints
+             (replaces the JAX-RS layer that previously relied on the server-provided jakarta.ws.rs-api). -->
         <dependency>
-            <groupId>jakarta.enterprise</groupId>
-            <artifactId>jakarta.enterprise.cdi-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.annotation</groupId>
-            <artifactId>jakarta.annotation-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.ws.rs</groupId>
-            <artifactId>jakarta.ws.rs-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.persistence</groupId>
-            <artifactId>jakarta.persistence-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.validation</groupId>
-            <artifactId>jakarta.validation-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.ejb</groupId>
-            <artifactId>jakarta.ejb-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.hibernate.validator</groupId>
-            <artifactId>hibernate-validator</artifactId>
-            <scope>provided</scope>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- Test dependencies -->
+        <!-- Persistence: Spring Data JPA + Hibernate ORM 6.x. Supplies jakarta.persistence
+             transitively and replaces the EAP-provided jakarta.persistence-api plus the
+             hand-written EntityManager data-access code. -->
         <dependency>
-            <groupId>org.jboss.arquillian.junit</groupId>
-            <artifactId>arquillian-junit-container</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <scope>test</scope>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
         </dependency>
 
-        <!-- Net32 augmentation: added PostgreSQL driver -->
+        <!-- Bean Validation: Hibernate Validator. Supplies jakarta.validation for the Member
+             entity constraints and replaces both the provided jakarta.validation-api and the
+             standalone org.hibernate.validator:hibernate-validator dependency. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- PostgreSQL JDBC driver. This is the ONLY dependency that keeps an explicit version
+             (42.7.3, carried over from the EAP build) and the ONLY one whose scope flips
+             provided -> runtime: under EAP the driver was supplied by the server, but the embedded
+             Spring Boot server now needs it on the runtime classpath. -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>42.7.3</version>
-            <scope>provided</scope>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Test: JUnit 5 (Jupiter), AssertJ, Spring Test, MockMvc and TestRestTemplate.
+             Replaces the Arquillian/ShrinkWrap in-container test stack and JUnit 4; the six
+             integration tests are rewritten as @SpringBootTest. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Testcontainers PostgreSQL: the preferred integration-test database. The seed data in
+             db/03_seed_data.sql uses PostgreSQL-specific syntax (OVERRIDING SYSTEM VALUE and
+             ON CONFLICT (id) DO NOTHING) that H2 does not fully support, so a real PostgreSQL
+             container is used for behavioral fidelity. Version is BOM-managed by the parent
+             (which imports the Testcontainers BOM). -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers JUnit 5 integration (@Testcontainers / @Container support). Version BOM-managed. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
-    <profiles>
-        <profile>
-            <id>arq-remote</id>
-            <dependencies>
-                <dependency>
-                    <groupId>org.wildfly.arquillian</groupId>
-                    <artifactId>wildfly-arquillian-container-remote</artifactId>
-                    <scope>test</scope>
-                </dependency>
-            </dependencies>
-        </profile>
-        <profile>
-            <id>openshift</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.eclipse.jkube</groupId>
-                        <artifactId>openshift-maven-plugin</artifactId>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
+    <!--
+        No <profiles> section: the former arq-remote profile (org.wildfly.arquillian:
+        wildfly-arquillian-container-remote) and openshift profile (org.eclipse.jkube:
+        openshift-maven-plugin) have both been removed. OpenShift/JKube support is intentionally
+        not re-added as part of this migration.
+    -->
 
     <build>
+        <!-- Retained from the original build (Minimal Change Clause): produces target/kitchensink.jar,
+             consistent with the documented run command `java -jar target/kitchensink-*.jar`. -->
         <finalName>${project.artifactId}</finalName>
         <plugins>
+            <!-- Spring Boot repackage plugin: repackages the module into an executable ("fat") JAR
+                 and enables `mvn spring-boot:run`. Replaces the maven-war-plugin (no WAR or web.xml
+                 is produced anymore, so failOnMissingWebXml is no longer relevant). Version is
+                 managed by spring-boot-starter-parent. -->
             <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-war-plugin</artifactId>
-                <configuration>
-                    <failOnMissingWebXml>false</failOnMissingWebXml>
-                </configuration>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
         </plugins>
     </build>
