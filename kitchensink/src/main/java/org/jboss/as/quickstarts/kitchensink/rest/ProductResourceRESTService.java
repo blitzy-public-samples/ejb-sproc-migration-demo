@@ -1,124 +1,120 @@
 package org.jboss.as.quickstarts.kitchensink.rest;
 
-import jakarta.enterprise.context.RequestScoped;
-import jakarta.inject.Inject;
-import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.DefaultValue;
-import jakarta.ws.rs.GET;
-import jakarta.ws.rs.Path;
-import jakarta.ws.rs.PathParam;
-import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
-import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 import org.jboss.as.quickstarts.kitchensink.data.ProductRepository;
 import org.jboss.as.quickstarts.kitchensink.model.Product;
 import org.jboss.as.quickstarts.kitchensink.service.PricingService;
 import org.jboss.as.quickstarts.kitchensink.service.VendorSelectionService;
 
-@Path("/products")
-@RequestScoped
-@Produces(MediaType.APPLICATION_JSON)
-@Consumes(MediaType.APPLICATION_JSON)
+/**
+ * Product catalog REST endpoints.
+ *
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): converted from a JAX-RS
+ * {@code @Path("/products") @RequestScoped} resource to a Spring MVC {@code @RestController}.
+ * The class-level base path is {@code /api/products}; combined with the application context path
+ * ({@code /kitchensink}) the externally visible base is {@code /kitchensink/api/products}, exactly
+ * matching the URLs the PHP storefront is hardcoded to. JAX-RS {@code Response} is replaced by
+ * {@link ResponseEntity}; {@code @PathParam}/{@code @QueryParam} by {@code @PathVariable}/
+ * {@code @RequestParam}; field {@code @Inject} by constructor injection.</p>
+ *
+ * <p>The {@code findById} return type changed from entity-or-null (legacy custom repository) to
+ * {@code Optional<Product>} (Spring Data); callers adapt with {@code orElse(null)}. All paths,
+ * JSON shapes, and HTTP status codes are preserved.</p>
+ */
+@RestController
+@RequestMapping("/api/products")
 public class ProductResourceRESTService {
 
-    @Inject
-    private ProductRepository productRepository;
+    private final ProductRepository productRepository;
+    private final PricingService pricingService;
+    private final VendorSelectionService vendorSelectionService;
 
-    @Inject
-    private PricingService pricingService;
-
-    @Inject
-    private VendorSelectionService vendorSelectionService;
-
-    /**
-     * GET /products
-     * Returns all products sorted by name.
-     */
-    @GET
-    @Path("")
-    public Response listProducts() {
-        List<Product> products = productRepository.findAll();
-        return Response.ok(products).build();
+    public ProductResourceRESTService(ProductRepository productRepository,
+                                      PricingService pricingService,
+                                      VendorSelectionService vendorSelectionService) {
+        this.productRepository = productRepository;
+        this.pricingService = pricingService;
+        this.vendorSelectionService = vendorSelectionService;
     }
 
     /**
-     * GET /products/{id}
-     * Returns a single product by ID, or 404 if not found.
+     * GET /api/products — returns all products.
      */
-    @GET
-    @Path("/{id}")
-    public Response getProduct(@PathParam("id") Long id) {
-        Product product = productRepository.findById(id);
+    @GetMapping
+    public ResponseEntity<List<Product>> listProducts() {
+        return ResponseEntity.ok(productRepository.findAll());
+    }
+
+    /**
+     * GET /api/products/{id} — returns a single product by ID, or 404 if not found.
+     */
+    @GetMapping("/{id}")
+    public ResponseEntity<?> getProduct(@PathVariable("id") Long id) {
+        Product product = productRepository.findById(id).orElse(null);
         if (product == null) {
-            return Response.status(Response.Status.NOT_FOUND)
-                .entity("Product not found: " + id)
-                .build();
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Product not found: " + id);
         }
-        return Response.ok(product).build();
+        return ResponseEntity.ok(product);
     }
 
     /**
-     * GET /products/category/{category}
-     * Returns all products in a given category.
+     * GET /api/products/category/{category} — returns all products in a given category.
      */
-    @GET
-    @Path("/category/{category}")
-    public Response getProductsByCategory(@PathParam("category") String category) {
-        List<Product> products = productRepository.findByCategory(category);
-        return Response.ok(products).build();
+    @GetMapping("/category/{category}")
+    public ResponseEntity<List<Product>> getProductsByCategory(@PathVariable("category") String category) {
+        return ResponseEntity.ok(productRepository.findByCategoryOrderByNameAsc(category));
     }
 
     /**
-     * GET /products/{id}/vendors?quantity=N
-     * Returns ranked vendor list for a product at a given quantity.
+     * GET /api/products/{id}/vendors?quantity=N — returns the ranked vendor list for a product at a
+     * given quantity. Defaults quantity to 1.
      */
-    @GET
-    @Path("/{id}/vendors")
-    public Response getVendorsForProduct(
-            @PathParam("id") Long id,
-            @QueryParam("quantity") @DefaultValue("1") int quantity) {
-        Product product = productRepository.findById(id);
+    @GetMapping("/{id}/vendors")
+    public ResponseEntity<?> getVendorsForProduct(
+            @PathVariable("id") Long id,
+            @RequestParam(value = "quantity", defaultValue = "1") int quantity) {
+        Product product = productRepository.findById(id).orElse(null);
         if (product == null) {
-            return Response.status(Response.Status.NOT_FOUND)
-                .entity("Product not found: " + id)
-                .build();
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Product not found: " + id);
         }
         List<VendorSelectionService.VendorPriceResult> vendors =
             vendorSelectionService.getVendorPricesForProduct(id, quantity);
-        return Response.ok(vendors).build();
+        return ResponseEntity.ok(vendors);
     }
 
     /**
-     * GET /products/{id}/price?vendorId=N&quantity=N
-     * Returns the calculated unit price for a product/vendor/quantity combination.
+     * GET /api/products/{id}/price?vendorId=N&quantity=N — returns the calculated unit price for a
+     * product/vendor/quantity combination. Returns 400 if {@code vendorId} is absent or the price
+     * cannot be computed (e.g., the vendor does not stock the product), and 404 if the product does
+     * not exist — preserving the legacy endpoint's exact status contract.
      */
-    @GET
-    @Path("/{id}/price")
-    public Response getPrice(
-            @PathParam("id") Long id,
-            @QueryParam("vendorId") Long vendorId,
-            @QueryParam("quantity") @DefaultValue("1") int quantity) {
+    @GetMapping("/{id}/price")
+    public ResponseEntity<?> getPrice(
+            @PathVariable("id") Long id,
+            @RequestParam(value = "vendorId", required = false) Long vendorId,
+            @RequestParam(value = "quantity", defaultValue = "1") int quantity) {
         if (vendorId == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity("vendorId query parameter is required")
-                .build();
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("vendorId query parameter is required");
         }
-        Product product = productRepository.findById(id);
+        Product product = productRepository.findById(id).orElse(null);
         if (product == null) {
-            return Response.status(Response.Status.NOT_FOUND)
-                .entity("Product not found: " + id)
-                .build();
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Product not found: " + id);
         }
         try {
             BigDecimal unitPrice = pricingService.calculatePrice(id, vendorId, quantity);
-            return Response.ok(unitPrice).build();
+            return ResponseEntity.ok(unitPrice);
         } catch (Exception e) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity("Could not calculate price: " + e.getMessage())
-                .build();
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("Could not calculate price: " + e.getMessage());
         }
     }
 }

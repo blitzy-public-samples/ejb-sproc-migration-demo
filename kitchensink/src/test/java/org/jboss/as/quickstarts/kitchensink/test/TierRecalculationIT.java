@@ -1,121 +1,64 @@
 package org.jboss.as.quickstarts.kitchensink.test;
 
-import jakarta.inject.Inject;
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
-import jakarta.transaction.UserTransaction;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.UUID;
-import org.jboss.arquillian.container.test.api.Deployment;
-import org.jboss.arquillian.junit.Arquillian;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.annotation.Transactional;
+
+import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderRepository;
-import org.jboss.as.quickstarts.kitchensink.data.ProductRepository;
-import org.jboss.as.quickstarts.kitchensink.data.VendorRepository;
-import org.jboss.as.quickstarts.kitchensink.model.DiscountAudit;
 import org.jboss.as.quickstarts.kitchensink.model.Member;
 import org.jboss.as.quickstarts.kitchensink.model.Order;
-import org.jboss.as.quickstarts.kitchensink.model.OrderDraftItem;
-import org.jboss.as.quickstarts.kitchensink.model.OrderItem;
-import org.jboss.as.quickstarts.kitchensink.model.Product;
-import org.jboss.as.quickstarts.kitchensink.model.ShippingZone;
-import org.jboss.as.quickstarts.kitchensink.model.Vendor;
-import org.jboss.as.quickstarts.kitchensink.model.VendorInventory;
-import org.jboss.as.quickstarts.kitchensink.model.VendorInventoryId;
-import org.jboss.as.quickstarts.kitchensink.service.DiscountService;
-import org.jboss.as.quickstarts.kitchensink.service.OrderService;
-import org.jboss.as.quickstarts.kitchensink.service.PricingService;
-import org.jboss.as.quickstarts.kitchensink.service.ShippingService;
 import org.jboss.as.quickstarts.kitchensink.service.TierRecalculationService;
-import org.jboss.as.quickstarts.kitchensink.service.VendorSelectionService;
-import org.jboss.shrinkwrap.api.Archive;
-import org.jboss.shrinkwrap.api.ShrinkWrap;
-import org.jboss.shrinkwrap.api.asset.EmptyAsset;
-import org.jboss.shrinkwrap.api.spec.WebArchive;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
 
-@RunWith(Arquillian.class)
-public class TierRecalculationIT {
+/**
+ * Integration tests for {@link TierRecalculationService} (the Java re-implementation of
+ * {@code recalculate_customer_tiers}).
+ *
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): rewritten from Arquillian/JUnit 4 to
+ * {@code @SpringBootTest} + JUnit 5. The class is {@code @Transactional} so the test members and orders it
+ * creates — and any tier changes the recalculation makes to the externally-seeded members — are rolled
+ * back at the end of each test. This both isolates the tests and protects the seed data (the recalculation
+ * loops over <em>all</em> members), replacing the legacy manual {@code UserTransaction} cleanup. Each test
+ * asserts only on the tier of the member it created.</p>
+ *
+ * <p>Tier thresholds (90-day rolling CONFIRMED spend): PLATINUM ≥ $5,000, GOLD ≥ $2,000, SILVER ≥ $500,
+ * else BRONZE.</p>
+ */
+@SpringBootTest
+@ActiveProfiles("test")
+@Transactional
+class TierRecalculationIT {
 
-    @Deployment
-    public static Archive<?> createDeployment() {
-        return ShrinkWrap.create(WebArchive.class, "test.war")
-            .addClasses(
-                Member.class, Product.class, Vendor.class,
-                VendorInventory.class, VendorInventoryId.class,
-                Order.class, OrderItem.class, ShippingZone.class,
-                DiscountAudit.class, OrderDraftItem.class,
-                ProductRepository.class, VendorRepository.class, OrderRepository.class,
-                PricingService.class, VendorSelectionService.class,
-                DiscountService.class, ShippingService.class,
-                OrderService.class, TierRecalculationService.class
-            )
-            .addAsResource("META-INF/persistence.xml")
-            .addAsWebInfResource(EmptyAsset.INSTANCE, "beans.xml");
-    }
-
-    @Inject
+    @Autowired
     private TierRecalculationService tierRecalculationService;
 
-    @PersistenceContext
-    private EntityManager em;
+    @Autowired
+    private MemberRepository memberRepository;
 
-    @Inject
-    private UserTransaction utx;
+    @Autowired
+    private OrderRepository orderRepository;
 
-    // Track test member IDs for cleanup
-    private Long testMemberId = null;
-    private Long testOrderId  = null;
-
-    @After
-    public void cleanup() throws Exception {
-        utx.begin();
-        if (testOrderId != null) {
-            em.createQuery("DELETE FROM OrderItem oi WHERE oi.orderId = :oid")
-              .setParameter("oid", testOrderId).executeUpdate();
-            em.createQuery("DELETE FROM Order o WHERE o.id = :oid")
-              .setParameter("oid", testOrderId).executeUpdate();
-        }
-        if (testMemberId != null) {
-            em.createQuery("DELETE FROM DiscountAudit da WHERE da.memberId = :mid")
-              .setParameter("mid", testMemberId).executeUpdate();
-            em.createQuery("DELETE FROM OrderDraftItem odi WHERE odi.memberId = :mid")
-              .setParameter("mid", testMemberId).executeUpdate();
-            em.createQuery("DELETE FROM Order o WHERE o.memberId = :mid")
-              .setParameter("mid", testMemberId).executeUpdate();
-            em.createQuery("DELETE FROM Member m WHERE m.id = :mid")
-              .setParameter("mid", testMemberId).executeUpdate();
-        }
-        testMemberId = null;
-        testOrderId  = null;
-        utx.commit();
-    }
-
-    /**
-     * Helper: creates and persists a new test member with unique email.
-     */
-    private Member createTestMember(String tier, BigDecimal totalSpend) throws Exception {
-        utx.begin();
+    /** Creates and persists a new test member with a unique email. */
+    private Member createTestMember(String tier, BigDecimal totalSpend) {
         Member m = new Member();
         m.setName("Test Member");
         m.setEmail("test-" + UUID.randomUUID() + "@test.com");
         m.setPhoneNumber("9195559999");
         m.setTier(tier);
         m.setTotalSpend(totalSpend);
-        em.persist(m);
-        utx.commit();
-        testMemberId = m.getId();
-        return m;
+        return memberRepository.save(m);
     }
 
-    /**
-     * Helper: creates and persists a CONFIRMED order for a member with a given total and timestamp.
-     */
-    private Order createTestOrder(Long memberId, BigDecimal total, LocalDateTime createdAt) throws Exception {
-        utx.begin();
+    /** Creates and persists a CONFIRMED order for a member with a given total and timestamp. */
+    private Order createTestOrder(Long memberId, BigDecimal total, LocalDateTime createdAt) {
         Order o = new Order();
         o.setMemberId(memberId);
         o.setStatus("CONFIRMED");
@@ -124,92 +67,67 @@ public class TierRecalculationIT {
         o.setShippingCost(BigDecimal.ZERO);
         o.setTotal(total);
         o.setCreatedAt(createdAt);
-        em.persist(o);
-        utx.commit();
-        testOrderId = o.getId();
-        return o;
+        return orderRepository.save(o);
     }
 
     /**
-     * Test 1: A new member with no orders should remain BRONZE after recalculation.
+     * Test 1: a new member with no orders remains BRONZE after recalculation.
      */
     @Test
-    public void testNewMemberRemainsBronze() throws Exception {
+    void testNewMemberRemainsBronze() {
         Member member = createTestMember("BRONZE", BigDecimal.ZERO);
 
         tierRecalculationService.triggerRecalculation();
 
-        utx.begin();
-        em.clear();
-        Member updated = em.find(Member.class, member.getId());
-        utx.commit();
-
-        Assert.assertEquals("New member with no orders should remain BRONZE",
-            "BRONZE", updated.getTier());
+        Member updated = memberRepository.findById(member.getId()).orElseThrow();
+        assertEquals("BRONZE", updated.getTier(),
+            "New member with no orders should remain BRONZE");
     }
 
     /**
-     * Test 2: Member with $750 in CONFIRMED orders within 30 days should become SILVER.
-     * SILVER threshold: $500 - $1,999.99 (90-day rolling spend).
+     * Test 2: a member with $750 of CONFIRMED spend within the window is upgraded to SILVER.
      */
     @Test
-    public void testMemberUpgradesToSilverAfterSpend() throws Exception {
+    void testMemberUpgradesToSilverAfterSpend() {
         Member member = createTestMember("BRONZE", BigDecimal.ZERO);
         createTestOrder(member.getId(), new BigDecimal("750.00"), LocalDateTime.now().minusDays(15));
 
         tierRecalculationService.triggerRecalculation();
 
-        utx.begin();
-        em.clear();
-        Member updated = em.find(Member.class, member.getId());
-        utx.commit();
-
-        Assert.assertEquals("Member with $750 spend in 30 days should be upgraded to SILVER",
-            "SILVER", updated.getTier());
+        Member updated = memberRepository.findById(member.getId()).orElseThrow();
+        assertEquals("SILVER", updated.getTier(),
+            "Member with $750 spend in 15 days should be upgraded to SILVER");
     }
 
     /**
-     * Test 3: Member with $3,000 in CONFIRMED orders within 90 days should become GOLD.
-     * GOLD threshold: $2,000 - $4,999.99 (90-day rolling spend).
+     * Test 3: a member with $3,000 of CONFIRMED spend within the window is upgraded to GOLD.
      */
     @Test
-    public void testMemberUpgradesToGoldAfterSpend() throws Exception {
+    void testMemberUpgradesToGoldAfterSpend() {
         Member member = createTestMember("BRONZE", BigDecimal.ZERO);
         createTestOrder(member.getId(), new BigDecimal("3000.00"), LocalDateTime.now().minusDays(45));
 
         tierRecalculationService.triggerRecalculation();
 
-        utx.begin();
-        em.clear();
-        Member updated = em.find(Member.class, member.getId());
-        utx.commit();
-
-        Assert.assertEquals("Member with $3,000 spend in 45 days should be upgraded to GOLD",
-            "GOLD", updated.getTier());
+        Member updated = memberRepository.findById(member.getId()).orElseThrow();
+        assertEquals("GOLD", updated.getTier(),
+            "Member with $3,000 spend in 45 days should be upgraded to GOLD");
     }
 
     /**
-     * Test 4: A GOLD member whose orders are all older than 91 days should drop to BRONZE.
-     * Old orders fall outside the 90-day rolling window and no longer count toward tier.
+     * Test 4: a GOLD member whose only order is older than the 90-day window drops to BRONZE, because
+     * the order no longer counts toward the rolling spend.
      */
     @Test
-    public void testMemberDoesNotDowngradeOnOldOrders() throws Exception {
+    void testMemberDoesNotDowngradeOnOldOrders() {
         Member member = createTestMember("GOLD", new BigDecimal("3000.00"));
-        // Place $3,000 order but 92 days ago — outside the 90-day window
+        // $3,000 order placed 92 days ago — outside the 90-day window, so it does not count.
         createTestOrder(member.getId(), new BigDecimal("3000.00"), LocalDateTime.now().minusDays(92));
 
         tierRecalculationService.triggerRecalculation();
 
-        utx.begin();
-        em.clear();
-        Member updated = em.find(Member.class, member.getId());
-        utx.commit();
-
-        // The 90-day spend is $0 because all orders are older than 90 days.
-        // Per recalculate_customer_tiers() logic: $0 spend -> BRONZE
-        Assert.assertEquals(
-            "GOLD member with all orders > 91 days old should drop to BRONZE (no qualifying 90-day spend)",
-            "BRONZE", updated.getTier()
-        );
+        Member updated = memberRepository.findById(member.getId()).orElseThrow();
+        assertEquals("BRONZE", updated.getTier(),
+            "GOLD member with all orders > 90 days old should drop to BRONZE (no qualifying spend)");
     }
 }

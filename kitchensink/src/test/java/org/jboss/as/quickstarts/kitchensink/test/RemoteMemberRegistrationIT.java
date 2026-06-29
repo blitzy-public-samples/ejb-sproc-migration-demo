@@ -16,62 +16,69 @@
  */
 package org.jboss.as.quickstarts.kitchensink.test;
 
-import jakarta.json.Json;
-import jakarta.json.JsonObject;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.logging.Logger;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ActiveProfiles;
 
-import org.jboss.as.quickstarts.kitchensink.model.Member;
-import org.junit.Assert;
-import org.junit.Test;
+/**
+ * Remote (live HTTP) integration test for the member-creation endpoint.
+ *
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): rewritten from a plain JDK-HttpClient
+ * JUnit 4 test that targeted a deployed EAP server at {@code /rest/members} to a
+ * {@code @SpringBootTest(webEnvironment = RANDOM_PORT)} + {@link TestRestTemplate} test that exercises the
+ * embedded server. The endpoint moves to {@code /api/members}. The request URL includes the configured
+ * {@code server.servlet.context-path} (which is {@code /kitchensink} — inherited from the base
+ * {@code application.properties}, since the test profile does not override it), so the effective path is
+ * {@code /kitchensink/api/members}.</p>
+ *
+ * <p>This test is intentionally NOT {@code @Transactional}: it performs a real HTTP round trip, so the
+ * member is committed by the server. {@code jane@mailinator.com} is therefore committed here;
+ * {@link MemberRegistrationIT} (which uses the same email) rolls back and runs earlier alphabetically, so
+ * there is no duplicate-email collision in the shared Testcontainers database.</p>
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ActiveProfiles("test")
+class RemoteMemberRegistrationIT {
 
-public class RemoteMemberRegistrationIT {
+    @LocalServerPort
+    private int port;
 
-    private static final Logger log = Logger.getLogger(RemoteMemberRegistrationIT.class.getName());
+    @Value("${server.servlet.context-path:}")
+    private String contextPath;
 
-    protected URI getHTTPEndpoint() {
-        String host = getServerHost();
-        if (host == null) {
-            host = "http://localhost:8080/kitchensink";
-        }
-        try {
-            return new URI(host + "/rest/members");
-        } catch (URISyntaxException ex) {
-            throw new RuntimeException(ex);
-        }
-    }
-
-    private String getServerHost() {
-        String host = System.getenv("SERVER_HOST");
-        if (host == null) {
-            host = System.getProperty("server.host");
-        }
-        return host;
-    }
+    @Autowired
+    private TestRestTemplate restTemplate;
 
     @Test
-    public void testRegister() throws Exception {
-        Member newMember = new Member();
-        newMember.setName("Jane Doe");
-        newMember.setEmail("jane@mailinator.com");
-        newMember.setPhoneNumber("2125551234");
-        JsonObject json = Json.createObjectBuilder()
-                .add("name", "Jane Doe")
-                .add("email", "jane@mailinator.com")
-                .add("phoneNumber", "2125551234").build();
-        HttpRequest request = HttpRequest.newBuilder(getHTTPEndpoint())
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(json.toString()))
-                .build();
-        HttpResponse response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
-        Assert.assertEquals(200, response.statusCode());
-        Assert.assertEquals("", response.body().toString() );
-    }
+    void testRegister() {
+        Map<String, String> json = new LinkedHashMap<>();
+        json.put("name", "Jane Doe");
+        json.put("email", "jane@mailinator.com");
+        json.put("phoneNumber", "2125551234");
 
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, String>> request = new HttpEntity<>(json, headers);
+
+        String url = "http://localhost:" + port + contextPath + "/api/members";
+        ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
+
+        assertEquals(200, response.getStatusCode().value(), "Member creation should return HTTP 200");
+        assertTrue(response.getBody() == null || response.getBody().isEmpty(),
+            "Successful member creation should return an empty body");
+    }
 }

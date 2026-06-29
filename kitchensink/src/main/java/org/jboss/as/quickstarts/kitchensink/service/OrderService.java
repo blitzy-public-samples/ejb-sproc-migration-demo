@@ -1,48 +1,74 @@
 package org.jboss.as.quickstarts.kitchensink.service;
 
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-import jakarta.persistence.EntityManager;
-import jakarta.transaction.Transactional;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
+import org.jboss.as.quickstarts.kitchensink.data.OrderDraftItemRepository;
+import org.jboss.as.quickstarts.kitchensink.data.OrderItemRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderRepository;
+import org.jboss.as.quickstarts.kitchensink.data.ProductRepository;
+import org.jboss.as.quickstarts.kitchensink.model.Member;
 import org.jboss.as.quickstarts.kitchensink.model.Order;
 import org.jboss.as.quickstarts.kitchensink.model.OrderDraftItem;
 import org.jboss.as.quickstarts.kitchensink.model.OrderItem;
+import org.jboss.as.quickstarts.kitchensink.model.Product;
 
 /**
- * OrderService - orchestrates the full order lifecycle.
+ * OrderService — orchestrates the full order lifecycle, re-implementing the {@code process_order}
+ * PL/pgSQL stored procedure in Java.
  *
- * previewOrder() mirrors the logic of process_order() stored procedure.
- * submitOrder() delegates to process_order() for atomic execution.
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): formerly a CDI
+ * {@code @ApplicationScoped} bean whose {@code submitOrder()} delegated to a native
+ * {@code SELECT process_order(...)} query while {@code previewOrder()} re-implemented the same
+ * logic in Java — a documented dual-path maintenance hazard. It is now a Spring {@code @Service}
+ * with a single private {@link #orchestrateOrder} that performs all read-only computation
+ * (vendor selection, pricing, line totals, discount, shipping, totals). Both paths share it:
+ * {@code previewOrder()} maps the result without persisting; {@code submitOrder()} is
+ * {@code @Transactional} and additionally persists the order, persists order items, increments the
+ * member's total spend, and clears the draft cart.</p>
  *
- * Shared dependencies: PricingService, DiscountService, VendorSelectionService, ShippingService
- * are all injected here as well as into each other (see DiscountService javadoc for cross-dep note).
+ * <p>Side-effect preservation: {@code orchestrateOrder} invokes {@link DiscountService#calculateDiscount}
+ * which writes exactly one {@code discount_audit} row — preserving today's behavior where both the
+ * preview path and the submit path each write one audit row (never dropped from preview, never
+ * double-counted in submit).</p>
  */
-@ApplicationScoped
+@Service
 public class OrderService {
 
-    @Inject
-    private EntityManager em;
+    private final PricingService pricingService;
+    private final VendorSelectionService vendorSelectionService;
+    private final DiscountService discountService;
+    private final ShippingService shippingService;
+    private final OrderRepository orderRepository;
+    private final OrderItemRepository orderItemRepository;
+    private final MemberRepository memberRepository;
+    private final OrderDraftItemRepository orderDraftItemRepository;
+    private final ProductRepository productRepository;
 
-    @Inject
-    private OrderRepository orderRepository;
-
-    @Inject
-    private PricingService pricingService;
-
-    @Inject
-    private VendorSelectionService vendorSelectionService;
-
-    @Inject
-    private DiscountService discountService;
-
-    @Inject
-    private ShippingService shippingService;
+    public OrderService(PricingService pricingService,
+                        VendorSelectionService vendorSelectionService,
+                        DiscountService discountService,
+                        ShippingService shippingService,
+                        OrderRepository orderRepository,
+                        OrderItemRepository orderItemRepository,
+                        MemberRepository memberRepository,
+                        OrderDraftItemRepository orderDraftItemRepository,
+                        ProductRepository productRepository) {
+        this.pricingService = pricingService;
+        this.vendorSelectionService = vendorSelectionService;
+        this.discountService = discountService;
+        this.shippingService = shippingService;
+        this.orderRepository = orderRepository;
+        this.orderItemRepository = orderItemRepository;
+        this.memberRepository = memberRepository;
+        this.orderDraftItemRepository = orderDraftItemRepository;
+        this.productRepository = productRepository;
+    }
 
     /**
      * Adds a product to the member's draft cart.
@@ -57,7 +83,7 @@ public class OrderService {
         item.setMemberId(memberId);
         item.setProductId(productId);
         item.setQuantity(quantity);
-        em.persist(item);
+        orderDraftItemRepository.save(item);
     }
 
     /**
@@ -68,36 +94,24 @@ public class OrderService {
      */
     @Transactional
     public void removeFromCart(Long memberId, Long productId) {
-        em.createQuery(
-                "DELETE FROM OrderDraftItem odi WHERE odi.memberId = :memberId AND odi.productId = :productId")
-            .setParameter("memberId", memberId)
-            .setParameter("productId", productId)
-            .executeUpdate();
+        orderDraftItemRepository.deleteByMemberIdAndProductId(memberId, productId);
     }
 
     /**
-     * Previews the order total without committing it.
+     * Performs all read-only order computation shared by {@link #previewOrder} and
+     * {@link #submitOrder}: for each draft line it selects the best vendor, prices the line,
+     * accumulates the subtotal and total weight, then applies the member discount (which writes
+     * one {@code discount_audit} row) and shipping, and computes the final total.
      *
-     * NOTE: This method mirrors the logic of the process_order() stored procedure.
-     * Both paths must be kept in sync. Any pricing, discount, or shipping logic change
-     * must be applied to BOTH this method AND the stored procedure.
-     *
-     * @param memberId        the member ID
-     * @param destinationZip  the destination ZIP code
-     * @param expedite        whether expedited shipping is requested
-     * @return                an OrderPreview with full cost breakdown
+     * <p>This is the single source of truth that eliminates the former preview/submit drift.
+     * It performs no persistence, no member update, and no draft clearing.</p>
      */
-    public OrderPreview previewOrder(Long memberId, String destinationZip, boolean expedite) {
-        List<OrderDraftItem> draftItems = em.createQuery(
-                "SELECT odi FROM OrderDraftItem odi WHERE odi.memberId = :memberId",
-                OrderDraftItem.class)
-            .setParameter("memberId", memberId)
-            .getResultList();
+    private OrchestrationResult orchestrateOrder(Long memberId, String destinationZip, boolean expedite) {
+        List<OrderDraftItem> draftItems = orderDraftItemRepository.findByMemberId(memberId);
 
         BigDecimal subtotal = BigDecimal.ZERO;
         BigDecimal totalWeight = BigDecimal.ZERO;
         List<LineItemPreview> lineItems = new ArrayList<>();
-        Map<Long, Integer> productQuantities = new HashMap<>();
 
         for (OrderDraftItem draftItem : draftItems) {
             Long productId = draftItem.getProductId();
@@ -109,75 +123,146 @@ public class OrderService {
             }
 
             BigDecimal unitPrice = pricingService.calculatePrice(productId, vendorId, quantity);
-            BigDecimal lineTotal = unitPrice.multiply(BigDecimal.valueOf(quantity));
+            BigDecimal lineTotal = unitPrice.multiply(BigDecimal.valueOf(quantity))
+                .setScale(2, RoundingMode.HALF_UP);
             subtotal = subtotal.add(lineTotal);
-            productQuantities.put(productId, quantity);
 
-            LineItemPreview lip = new LineItemPreview(productId, vendorId, quantity, unitPrice, lineTotal);
-            lineItems.add(lip);
+            // Accumulate weight (weight_lbs may be null -> treated as 0), mirroring process_order
+            // which joined products for weight_lbs and used COALESCE(weight_lbs, 0).
+            Product product = productRepository.findById(productId).orElse(null);
+            BigDecimal weightLbs = (product != null && product.getWeightLbs() != null)
+                ? product.getWeightLbs() : BigDecimal.ZERO;
+            totalWeight = totalWeight.add(weightLbs.multiply(BigDecimal.valueOf(quantity)));
+
+            lineItems.add(new LineItemPreview(productId, vendorId, quantity, unitPrice, lineTotal));
         }
 
         BigDecimal discountAmount = discountService.calculateDiscount(memberId, subtotal);
-        BigDecimal shippingCost = shippingService.estimateShipping(productQuantities, destinationZip, expedite);
+        BigDecimal shippingCost = shippingService.calculateShipping(destinationZip, totalWeight, expedite);
         BigDecimal total = subtotal.subtract(discountAmount).add(shippingCost);
 
-        return new OrderPreview(subtotal, discountAmount, shippingCost, total, lineItems);
+        return new OrchestrationResult(subtotal, discountAmount, shippingCost, total, lineItems);
     }
 
     /**
-     * Submits the order by calling the process_order() stored procedure.
+     * Previews the order total without committing it. Delegates entirely to the shared
+     * {@link #orchestrateOrder} and maps the result to an {@link OrderPreview}; performs no
+     * persistence.
      *
-     * Stored procedure: process_order(member_id, destination_zip, expedite)
-     * Orchestrates: select_best_vendor -> calculate_price -> apply_customer_discount -> calculate_shipping
-     * Clears draft cart and updates member total_spend atomically
+     * @param memberId        the member ID
+     * @param destinationZip  the destination ZIP code
+     * @param expedite        whether expedited shipping is requested
+     * @return                an OrderPreview with full cost breakdown
+     */
+    public OrderPreview previewOrder(Long memberId, String destinationZip, boolean expedite) {
+        OrchestrationResult r = orchestrateOrder(memberId, destinationZip, expedite);
+        return new OrderPreview(r.subtotal, r.discountAmount, r.shippingCost, r.total, r.items);
+    }
+
+    /**
+     * Submits the order: validates the member and cart, runs the shared orchestration, then
+     * persists the {@code CONFIRMED} order and its items, increments the member's
+     * {@code total_spend}, and clears the draft cart — all atomically.
      *
      * @param memberId        the member ID
      * @param destinationZip  the destination ZIP code
      * @param expedite        whether expedited shipping is requested
      * @return                the new order ID
+     * @throws MemberNotFoundException if the member does not exist (≙ {@code P0003})
+     * @throws EmptyCartException      if the member's draft cart is empty (≙ {@code P0004})
      */
     @Transactional
     public Long submitOrder(Long memberId, String destinationZip, boolean expedite) {
-        Object result = em.createNativeQuery(
-                "SELECT process_order(:memberId, :destinationZip, :expedite)")
-            .setParameter("memberId", memberId)
-            .setParameter("destinationZip", destinationZip)
-            .setParameter("expedite", expedite)
-            .getSingleResult();
-
-        if (result instanceof Long) {
-            return (Long) result;
-        } else if (result instanceof Number) {
-            return ((Number) result).longValue();
-        } else {
-            throw new IllegalStateException(
-                "Unexpected result type from process_order: " + result.getClass());
+        // Validate member exists (≙ process_order P0003).
+        if (!memberRepository.existsById(memberId)) {
+            throw new MemberNotFoundException("Member not found: " + memberId);
         }
+        // Validate cart is not empty (≙ process_order P0004).
+        if (orderDraftItemRepository.findByMemberId(memberId).isEmpty()) {
+            throw new EmptyCartException("Cart is empty for member " + memberId);
+        }
+
+        OrchestrationResult r = orchestrateOrder(memberId, destinationZip, expedite);
+
+        // Persist the confirmed order.
+        Order order = new Order();
+        order.setMemberId(memberId);
+        order.setStatus("CONFIRMED");
+        order.setSubtotal(r.subtotal);
+        order.setDiscountAmount(r.discountAmount);
+        order.setShippingCost(r.shippingCost);
+        order.setTotal(r.total);
+        order.setCreatedAt(LocalDateTime.now());
+        Order savedOrder = orderRepository.save(order);
+
+        // Persist order items (entities use plain Long FKs with no cascade -> persist explicitly).
+        for (LineItemPreview li : r.items) {
+            OrderItem item = new OrderItem();
+            item.setOrderId(savedOrder.getId());
+            item.setProductId(li.getProductId());
+            item.setVendorId(li.getVendorId());
+            item.setQuantity(li.getQuantity());
+            item.setUnitPrice(li.getUnitPrice());
+            item.setLineTotal(li.getLineTotal());
+            orderItemRepository.save(item);
+        }
+
+        // Increment member total_spend and stamp tier_updated_at.
+        Member member = memberRepository.findById(memberId)
+            .orElseThrow(() -> new MemberNotFoundException("Member not found: " + memberId));
+        BigDecimal currentSpend = (member.getTotalSpend() != null) ? member.getTotalSpend() : BigDecimal.ZERO;
+        member.setTotalSpend(currentSpend.add(r.total));
+        member.setTierUpdatedAt(LocalDateTime.now());
+        memberRepository.save(member);
+
+        // Clear the draft cart.
+        orderDraftItemRepository.deleteByMemberId(memberId);
+
+        return savedOrder.getId();
     }
 
     /**
-     * Returns a single order by ID.
+     * Returns a single order by ID, or {@code null} if not found (the REST layer maps the null
+     * case to HTTP 404).
      *
      * @param orderId  the order ID
-     * @return         the Order entity
+     * @return         the Order entity, or {@code null}
      */
     public Order getOrder(Long orderId) {
-        return orderRepository.findById(orderId);
+        return orderRepository.findById(orderId).orElse(null);
     }
 
     /**
-     * Returns the order history for a member.
+     * Returns the order history for a member, sorted by creation date descending.
      *
      * @param memberId  the member ID
      * @return          list of orders sorted by creation date descending
      */
     public List<Order> getOrderHistory(Long memberId) {
-        return orderRepository.findByMemberId(memberId);
+        return orderRepository.findByMemberIdOrderByCreatedAtDesc(memberId);
     }
 
     // -----------------------------------------------------------------------
-    // Inner classes
+    // Result + view types
     // -----------------------------------------------------------------------
+
+    /** Immutable carrier for the computed values produced by {@link #orchestrateOrder}. */
+    private static final class OrchestrationResult {
+        private final BigDecimal subtotal;
+        private final BigDecimal discountAmount;
+        private final BigDecimal shippingCost;
+        private final BigDecimal total;
+        private final List<LineItemPreview> items;
+
+        private OrchestrationResult(BigDecimal subtotal, BigDecimal discountAmount,
+                BigDecimal shippingCost, BigDecimal total, List<LineItemPreview> items) {
+            this.subtotal = subtotal;
+            this.discountAmount = discountAmount;
+            this.shippingCost = shippingCost;
+            this.total = total;
+            this.items = items;
+        }
+    }
 
     public static class OrderPreview {
         private final BigDecimal subtotal;

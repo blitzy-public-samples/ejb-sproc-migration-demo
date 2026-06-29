@@ -1,191 +1,136 @@
 package org.jboss.as.quickstarts.kitchensink.test;
 
-import jakarta.inject.Inject;
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
-import jakarta.transaction.UserTransaction;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import java.math.BigDecimal;
-import java.util.List;
-import org.jboss.arquillian.container.test.api.Deployment;
-import org.jboss.arquillian.junit.Arquillian;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.annotation.Transactional;
+
+import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
+import org.jboss.as.quickstarts.kitchensink.data.OrderDraftItemRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderRepository;
-import org.jboss.as.quickstarts.kitchensink.data.ProductRepository;
-import org.jboss.as.quickstarts.kitchensink.data.VendorRepository;
-import org.jboss.as.quickstarts.kitchensink.model.DiscountAudit;
 import org.jboss.as.quickstarts.kitchensink.model.Member;
 import org.jboss.as.quickstarts.kitchensink.model.Order;
-import org.jboss.as.quickstarts.kitchensink.model.OrderDraftItem;
-import org.jboss.as.quickstarts.kitchensink.model.OrderItem;
-import org.jboss.as.quickstarts.kitchensink.model.Product;
-import org.jboss.as.quickstarts.kitchensink.model.ShippingZone;
-import org.jboss.as.quickstarts.kitchensink.model.Vendor;
-import org.jboss.as.quickstarts.kitchensink.model.VendorInventory;
-import org.jboss.as.quickstarts.kitchensink.model.VendorInventoryId;
-import org.jboss.as.quickstarts.kitchensink.service.DiscountService;
 import org.jboss.as.quickstarts.kitchensink.service.OrderService;
-import org.jboss.as.quickstarts.kitchensink.service.PricingService;
-import org.jboss.as.quickstarts.kitchensink.service.ShippingService;
-import org.jboss.as.quickstarts.kitchensink.service.TierRecalculationService;
-import org.jboss.as.quickstarts.kitchensink.service.VendorSelectionService;
-import org.jboss.shrinkwrap.api.Archive;
-import org.jboss.shrinkwrap.api.ShrinkWrap;
-import org.jboss.shrinkwrap.api.asset.EmptyAsset;
-import org.jboss.shrinkwrap.api.spec.WebArchive;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
 
-@RunWith(Arquillian.class)
-public class OrderServiceIT {
+/**
+ * Integration tests for {@link OrderService} (the unified {@code orchestrateOrder} path that replaces
+ * the legacy {@code process_order} delegation).
+ *
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): rewritten from Arquillian/JUnit 4 to
+ * {@code @SpringBootTest} + JUnit 5. The class is {@code @Transactional} so every test rolls back at the
+ * end — this isolates the tests, protects the externally-seeded member 2 (Robert Torres, SILVER) from
+ * permanent {@code total_spend} changes or leftover orders, and replaces the legacy manual
+ * {@code UserTransaction} bookkeeping. A {@code @BeforeEach} clears member 2's draft cart for a clean
+ * starting state. Data is read back through the Spring Data repositories within the same transaction.</p>
+ */
+@SpringBootTest
+@ActiveProfiles("test")
+@Transactional
+class OrderServiceIT {
 
-    // Use member 2 (Robert Torres, SILVER) to avoid conflicting with other tests
+    /** Member 2 (Robert Torres, SILVER) is used to avoid conflicting with other tests. */
     private static final Long TEST_MEMBER_ID = 2L;
-    private static final String TEST_ZIP     = "27601";
+    private static final String TEST_ZIP = "27601";
 
-    @Deployment
-    public static Archive<?> createDeployment() {
-        return ShrinkWrap.create(WebArchive.class, "test.war")
-            .addClasses(
-                Member.class, Product.class, Vendor.class,
-                VendorInventory.class, VendorInventoryId.class,
-                Order.class, OrderItem.class, ShippingZone.class,
-                DiscountAudit.class, OrderDraftItem.class,
-                ProductRepository.class, VendorRepository.class, OrderRepository.class,
-                PricingService.class, VendorSelectionService.class,
-                DiscountService.class, ShippingService.class,
-                OrderService.class, TierRecalculationService.class
-            )
-            .addAsResource("META-INF/persistence.xml")
-            .addAsWebInfResource(EmptyAsset.INSTANCE, "beans.xml");
-    }
-
-    @Inject
+    @Autowired
     private OrderService orderService;
 
-    @PersistenceContext
-    private EntityManager em;
+    @Autowired
+    private OrderRepository orderRepository;
 
-    @Inject
-    private UserTransaction utx;
+    @Autowired
+    private MemberRepository memberRepository;
 
-    @Before
-    public void cleanCartBefore() throws Exception {
-        utx.begin();
-        em.createQuery("DELETE FROM OrderDraftItem odi WHERE odi.memberId = :mid")
-          .setParameter("mid", TEST_MEMBER_ID)
-          .executeUpdate();
-        utx.commit();
-    }
+    @Autowired
+    private OrderDraftItemRepository orderDraftItemRepository;
 
-    @After
-    public void cleanCartAfter() throws Exception {
-        utx.begin();
-        em.createQuery("DELETE FROM OrderDraftItem odi WHERE odi.memberId = :mid")
-          .setParameter("mid", TEST_MEMBER_ID)
-          .executeUpdate();
-        utx.commit();
+    @BeforeEach
+    void cleanCart() {
+        orderDraftItemRepository.deleteByMemberId(TEST_MEMBER_ID);
     }
 
     /**
-     * Test 1: addToCart() should persist a new order_draft_items row.
+     * Test 1: {@code addToCart} persists a new {@code order_draft_items} row.
      */
     @Test
-    public void testAddToCartInsertsRow() throws Exception {
+    void testAddToCartInsertsRow() {
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
 
-        utx.begin();
-        Long count = em.createQuery(
-                "SELECT COUNT(odi) FROM OrderDraftItem odi WHERE odi.memberId = :mid",
-                Long.class)
-            .setParameter("mid", TEST_MEMBER_ID)
-            .getSingleResult();
-        utx.commit();
-
-        Assert.assertTrue("Cart should have at least 1 item after addToCart()", count >= 1);
+        long count = orderDraftItemRepository.findByMemberId(TEST_MEMBER_ID).size();
+        assertTrue(count >= 1, "Cart should have at least 1 item after addToCart()");
     }
 
     /**
-     * Test 2: previewOrder() on a non-empty cart should return a non-zero total.
+     * Test 2: {@code previewOrder} on a non-empty cart returns positive subtotal and total and a
+     * non-empty item list.
      */
     @Test
-    public void testPreviewOrderReturnsNonZeroTotal() throws Exception {
+    void testPreviewOrderReturnsNonZeroTotal() {
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
         orderService.addToCart(TEST_MEMBER_ID, 3L, 10);
 
         OrderService.OrderPreview preview = orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false);
 
-        Assert.assertNotNull("Preview should not be null", preview);
-        Assert.assertTrue("Subtotal should be > 0",
-            preview.getSubtotal().compareTo(BigDecimal.ZERO) > 0);
-        Assert.assertTrue("Total should be > 0",
-            preview.getTotal().compareTo(BigDecimal.ZERO) > 0);
-        Assert.assertFalse("Items list should not be empty", preview.getItems().isEmpty());
+        assertNotNull(preview, "Preview should not be null");
+        assertTrue(preview.getSubtotal().compareTo(BigDecimal.ZERO) > 0, "Subtotal should be > 0");
+        assertTrue(preview.getTotal().compareTo(BigDecimal.ZERO) > 0, "Total should be > 0");
+        assertFalse(preview.getItems().isEmpty(), "Items list should not be empty");
     }
 
     /**
-     * Test 3: submitOrder() should create a CONFIRMED order record.
+     * Test 3: {@code submitOrder} creates a CONFIRMED order record for the member.
      */
     @Test
-    public void testSubmitOrderCreatesConfirmedOrder() throws Exception {
+    void testSubmitOrderCreatesConfirmedOrder() {
         orderService.addToCart(TEST_MEMBER_ID, 2L, 3);
 
         Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
-        Assert.assertNotNull("Order ID should not be null after submitOrder()", orderId);
+        assertNotNull(orderId, "Order ID should not be null after submitOrder()");
 
-        utx.begin();
-        Order order = em.find(Order.class, orderId);
-        utx.commit();
-
-        Assert.assertNotNull("Order entity should exist in DB", order);
-        Assert.assertEquals("Order status should be CONFIRMED", "CONFIRMED", order.getStatus());
-        Assert.assertEquals("Order member ID should match", TEST_MEMBER_ID, order.getMemberId());
+        Order order = orderRepository.findById(orderId).orElse(null);
+        assertNotNull(order, "Order entity should exist in DB");
+        assertEquals("CONFIRMED", order.getStatus(), "Order status should be CONFIRMED");
+        assertEquals(TEST_MEMBER_ID, order.getMemberId(), "Order member ID should match");
     }
 
     /**
-     * Test 4: submitOrder() should clear the member's draft cart.
+     * Test 4: {@code submitOrder} clears the member's draft cart.
      */
     @Test
-    public void testSubmitOrderClearsDraftCart() throws Exception {
+    void testSubmitOrderClearsDraftCart() {
         orderService.addToCart(TEST_MEMBER_ID, 1L, 2);
         orderService.addToCart(TEST_MEMBER_ID, 4L, 1);
 
         orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
 
-        utx.begin();
-        Long remaining = em.createQuery(
-                "SELECT COUNT(odi) FROM OrderDraftItem odi WHERE odi.memberId = :mid",
-                Long.class)
-            .setParameter("mid", TEST_MEMBER_ID)
-            .getSingleResult();
-        utx.commit();
-
-        Assert.assertEquals("Draft cart should be empty after submitOrder()", 0L, remaining.longValue());
+        long remaining = orderDraftItemRepository.findByMemberId(TEST_MEMBER_ID).size();
+        assertEquals(0L, remaining, "Draft cart should be empty after submitOrder()");
     }
 
     /**
-     * Test 5: submitOrder() should increase the member's total_spend.
+     * Test 5: {@code submitOrder} increases the member's {@code total_spend}.
      */
     @Test
-    public void testMemberTotalSpendIncreasesAfterOrder() throws Exception {
-        utx.begin();
-        Member memberBefore = em.find(Member.class, TEST_MEMBER_ID);
+    void testMemberTotalSpendIncreasesAfterOrder() {
+        Member memberBefore = memberRepository.findById(TEST_MEMBER_ID).orElseThrow();
         BigDecimal spendBefore = memberBefore.getTotalSpend();
-        utx.commit();
 
         orderService.addToCart(TEST_MEMBER_ID, 5L, 2);
         orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
 
-        utx.begin();
-        em.clear(); // force re-read from DB
-        Member memberAfter = em.find(Member.class, TEST_MEMBER_ID);
+        Member memberAfter = memberRepository.findById(TEST_MEMBER_ID).orElseThrow();
         BigDecimal spendAfter = memberAfter.getTotalSpend();
-        utx.commit();
 
-        Assert.assertTrue(
-            "total_spend should increase after submitOrder()",
-            spendAfter.compareTo(spendBefore) > 0
-        );
+        assertTrue(spendAfter.compareTo(spendBefore) > 0,
+            "total_spend should increase after submitOrder()");
     }
 }

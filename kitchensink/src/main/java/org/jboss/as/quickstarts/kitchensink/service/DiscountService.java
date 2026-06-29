@@ -1,58 +1,107 @@
 package org.jboss.as.quickstarts.kitchensink.service;
 
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.jboss.as.quickstarts.kitchensink.data.DiscountAuditRepository;
+import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
+import org.jboss.as.quickstarts.kitchensink.model.DiscountAudit;
+import org.jboss.as.quickstarts.kitchensink.model.Member;
 
 /**
- * DiscountService - KEY cross-dependency bean.
+ * DiscountService — pure-Java re-implementation of the {@code apply_customer_discount(member_id,
+ * base_total)} PL/pgSQL stored procedure, and a key cross-dependency bean.
  *
- * Uses BOTH:
- *   1. apply_customer_discount() stored procedure (BRONZE=2%, SILVER=5%, GOLD=8%, PLATINUM=12%)
- *   2. PricingService (shared dependency) — also used by VendorSelectionService and OrderService
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): formerly a CDI
+ * {@code @ApplicationScoped} bean delegating to a native {@code SELECT apply_customer_discount(...)}
+ * query via {@code EntityManager}. It is now a Spring {@code @Service} that computes the discount
+ * in Java and persists the audit row via Spring Data, using the shared, stateless
+ * {@link PricingService} (also injected by {@code VendorSelectionService} and {@code OrderService}).</p>
  *
- * The stored procedure inserts an audit row into discount_audit on every call.
+ * <p>Tier discount rates (BRONZE 2%, SILVER 5%, GOLD 8%, PLATINUM 12%) and the
+ * {@code discount_audit} write are preserved exactly. The audit row written on every
+ * {@link #calculateDiscount} call is an observable side effect the migration must keep.</p>
  */
-@ApplicationScoped
+@Service
 public class DiscountService {
 
-    @Inject
-    private EntityManager em;
+    private final MemberRepository memberRepository;
+    private final DiscountAuditRepository discountAuditRepository;
+    private final PricingService pricingService;
 
-    @Inject
-    private PricingService pricingService;
+    public DiscountService(MemberRepository memberRepository,
+                           DiscountAuditRepository discountAuditRepository,
+                           PricingService pricingService) {
+        this.memberRepository = memberRepository;
+        this.discountAuditRepository = discountAuditRepository;
+        this.pricingService = pricingService;
+    }
 
     /**
-     * Calculates the discount AMOUNT for a member on a given base total.
-     * The stored procedure also inserts a row into discount_audit.
+     * Calculates the discount AMOUNT for a member on a given base total and persists a
+     * {@code discount_audit} row, mirroring {@code apply_customer_discount}.
+     *
+     * <p>Declared {@code @Transactional} so the audit insert participates in the caller's
+     * transaction when invoked from {@code OrderService.submitOrder}, and commits atomically when
+     * invoked standalone. The percentage is selected by tier
+     * (PLATINUM=0.12, GOLD=0.08, SILVER=0.05, otherwise BRONZE=0.02) and the amount is
+     * {@code ROUND(base_total * pct, 2)}.</p>
      *
      * @param memberId   the member ID
      * @param baseTotal  the base order total before discount
-     * @return           the discount amount (not percentage)
+     * @return           the discount amount (not the percentage)
+     * @throws MemberNotFoundException if the member does not exist (Java equivalent of the
+     *         stored procedure's {@code RAISE EXCEPTION ... ERRCODE = 'P0002'})
      */
+    @Transactional
     public BigDecimal calculateDiscount(Long memberId, BigDecimal baseTotal) {
-        // Stored procedure: apply_customer_discount(member_id, base_total)
-        // Returns discount AMOUNT (not percentage); inserts audit row into discount_audit
-        Object result = em.createNativeQuery(
-                "SELECT apply_customer_discount(:memberId, :baseTotal)")
-            .setParameter("memberId", memberId)
-            .setParameter("baseTotal", baseTotal)
-            .getSingleResult();
+        Member member = memberRepository.findById(memberId)
+            .orElseThrow(() -> new MemberNotFoundException("Member not found: " + memberId));
 
-        if (result instanceof BigDecimal) {
-            return (BigDecimal) result;
-        } else if (result instanceof Number) {
-            return new BigDecimal(result.toString());
-        } else {
-            throw new IllegalStateException(
-                "Unexpected result type from apply_customer_discount: " + result.getClass());
+        BigDecimal discountPct = discountPctForTier(member.getTier());
+        BigDecimal discountAmt = baseTotal.multiply(discountPct).setScale(2, RoundingMode.HALF_UP);
+
+        // Insert audit row (preserves the stored procedure's observable side effect).
+        DiscountAudit audit = new DiscountAudit();
+        audit.setMemberId(memberId);
+        audit.setBaseTotal(baseTotal);
+        audit.setDiscountPct(discountPct);
+        audit.setDiscountAmt(discountAmt);
+        audit.setAppliedAt(LocalDateTime.now());
+        discountAuditRepository.save(audit);
+
+        return discountAmt;
+    }
+
+    /**
+     * Maps a loyalty tier to its discount fraction, mirroring the stored procedure's
+     * {@code CASE} expression (unknown/null tiers fall through to the BRONZE default of 0.02).
+     *
+     * @param tier the member tier string
+     * @return the discount fraction (0.02, 0.05, 0.08, or 0.12)
+     */
+    private BigDecimal discountPctForTier(String tier) {
+        if (tier == null) {
+            return new BigDecimal("0.02");
+        }
+        switch (tier) {
+            case "PLATINUM":
+                return new BigDecimal("0.12");
+            case "GOLD":
+                return new BigDecimal("0.08");
+            case "SILVER":
+                return new BigDecimal("0.05");
+            default:
+                return new BigDecimal("0.02"); // BRONZE default
         }
     }
 
     /**
-     * Calculates the discounted line total for a member purchasing a product.
-     * Prices the line via PricingService then applies the member discount.
+     * Calculates the discounted line total for a member purchasing a product. Prices the line via
+     * the shared {@link PricingService} then applies the member discount (which also writes an
+     * audit row).
      *
      * @param memberId   the member ID
      * @param productId  the product ID
@@ -61,8 +110,6 @@ public class DiscountService {
      * @return           the discounted line total
      */
     public BigDecimal getDiscountedLineTotal(Long memberId, Long productId, Long vendorId, int quantity) {
-        // NOTE: PricingService is a shared dependency — also injected by OrderService and VendorSelectionService.
-        // Blitzy must resolve this shared dependency when extracting stored procedure logic to @Service classes.
         BigDecimal lineTotal = pricingService.calculateLineTotal(productId, vendorId, quantity);
         BigDecimal discount = calculateDiscount(memberId, lineTotal);
         return lineTotal.subtract(discount);
@@ -73,11 +120,11 @@ public class DiscountService {
      *
      * @param memberId  the member ID
      * @return          the tier string (BRONZE, SILVER, GOLD, PLATINUM)
+     * @throws MemberNotFoundException if the member does not exist
      */
     public String getMemberTier(Long memberId) {
-        return em.createQuery(
-                "SELECT m.tier FROM Member m WHERE m.id = :memberId", String.class)
-            .setParameter("memberId", memberId)
-            .getSingleResult();
+        return memberRepository.findById(memberId)
+            .map(Member::getTier)
+            .orElseThrow(() -> new MemberNotFoundException("Member not found: " + memberId));
     }
 }

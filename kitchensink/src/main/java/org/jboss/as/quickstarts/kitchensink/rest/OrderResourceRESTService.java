@@ -1,150 +1,133 @@
 package org.jboss.as.quickstarts.kitchensink.rest;
 
-import jakarta.enterprise.context.RequestScoped;
-import jakarta.inject.Inject;
-import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.DELETE;
-import jakarta.ws.rs.DefaultValue;
-import jakarta.ws.rs.GET;
-import jakarta.ws.rs.POST;
-import jakarta.ws.rs.Path;
-import jakarta.ws.rs.PathParam;
-import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
-import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.core.Response;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 import org.jboss.as.quickstarts.kitchensink.model.Order;
 import org.jboss.as.quickstarts.kitchensink.service.OrderService;
 
-@Path("/orders")
-@RequestScoped
-@Produces(MediaType.APPLICATION_JSON)
-@Consumes(MediaType.APPLICATION_JSON)
+/**
+ * Order and cart REST endpoints.
+ *
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): converted from a JAX-RS
+ * {@code @Path("/orders") @RequestScoped} resource to a Spring MVC {@code @RestController}. The base
+ * path is {@code /api/orders}; with the {@code /kitchensink} context path the externally visible base
+ * is {@code /kitchensink/api/orders}, matching the PHP storefront exactly. The actual legacy paths are
+ * preserved verbatim: {@code POST /cart/{memberId}}, {@code DELETE /cart/{memberId}/{productId}},
+ * {@code GET /cart/{memberId}/preview}, {@code POST /submit/{memberId}}, {@code GET /{orderId}}, and
+ * {@code GET /member/{memberId}}.</p>
+ *
+ * <p>Success status codes are preserved exactly because the PHP client keys on them: add-to-cart and
+ * submit return {@code 201}; submit's body is {@code {"orderId": N}}. Business-rule failures
+ * (member-not-found, empty cart) are thrown by the service as unchecked exceptions and mapped to HTTP
+ * status by {@link RestExceptionHandler}, replacing the legacy inline {@code WebApplicationException}
+ * handling. Request-level validation (missing {@code zip}) is handled inline with a 400.</p>
+ */
+@RestController
+@RequestMapping("/api/orders")
 public class OrderResourceRESTService {
 
-    @Inject
-    private OrderService orderService;
+    private final OrderService orderService;
+
+    public OrderResourceRESTService(OrderService orderService) {
+        this.orderService = orderService;
+    }
 
     /**
-     * POST /orders/cart/{memberId}
-     * Adds a product to the member's draft cart.
-     * Body: { "productId": N, "quantity": N }
+     * POST /api/orders/cart/{memberId} — adds a product to the member's draft cart.
+     * Body: {@code { "productId": N, "quantity": N }}. Returns 201 on success.
      */
-    @POST
-    @Path("/cart/{memberId}")
-    public Response addToCart(
-            @PathParam("memberId") Long memberId,
-            Map<String, Object> body) {
+    @PostMapping("/cart/{memberId}")
+    public ResponseEntity<?> addToCart(
+            @PathVariable("memberId") Long memberId,
+            @RequestBody Map<String, Object> body) {
         if (body == null || !body.containsKey("productId") || !body.containsKey("quantity")) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity("Request body must contain productId and quantity")
-                .build();
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("Request body must contain productId and quantity");
         }
         Long productId = ((Number) body.get("productId")).longValue();
         int quantity = ((Number) body.get("quantity")).intValue();
         if (quantity <= 0) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity("quantity must be greater than zero")
-                .build();
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("quantity must be greater than zero");
         }
         orderService.addToCart(memberId, productId, quantity);
-        return Response.status(Response.Status.CREATED)
-            .entity("Item added to cart")
-            .build();
+        return ResponseEntity.status(HttpStatus.CREATED).body("Item added to cart");
     }
 
     /**
-     * DELETE /orders/cart/{memberId}/{productId}
-     * Removes a product from the member's draft cart.
+     * DELETE /api/orders/cart/{memberId}/{productId} — removes a product from the member's draft cart.
      */
-    @DELETE
-    @Path("/cart/{memberId}/{productId}")
-    public Response removeFromCart(
-            @PathParam("memberId") Long memberId,
-            @PathParam("productId") Long productId) {
+    @DeleteMapping("/cart/{memberId}/{productId}")
+    public ResponseEntity<?> removeFromCart(
+            @PathVariable("memberId") Long memberId,
+            @PathVariable("productId") Long productId) {
         orderService.removeFromCart(memberId, productId);
-        return Response.ok("Item removed from cart").build();
+        return ResponseEntity.ok("Item removed from cart");
     }
 
     /**
-     * GET /orders/cart/{memberId}/preview?zip=XXXXX&expedite=true|false
-     * Returns a full order preview with pricing, discount, and shipping breakdown.
+     * GET /api/orders/cart/{memberId}/preview?zip=XXXXX&amp;expedite=true|false — returns a full
+     * order preview with pricing, discount, and shipping breakdown. A missing {@code zip} yields 400;
+     * business-rule failures propagate to {@link RestExceptionHandler}.
      */
-    @GET
-    @Path("/cart/{memberId}/preview")
-    public Response previewOrder(
-            @PathParam("memberId") Long memberId,
-            @QueryParam("zip") String zip,
-            @QueryParam("expedite") @DefaultValue("false") boolean expedite) {
+    @GetMapping("/cart/{memberId}/preview")
+    public ResponseEntity<?> previewOrder(
+            @PathVariable("memberId") Long memberId,
+            @RequestParam(value = "zip", required = false) String zip,
+            @RequestParam(value = "expedite", defaultValue = "false") boolean expedite) {
         if (zip == null || zip.isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity("zip query parameter is required")
-                .build();
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("zip query parameter is required");
         }
-        try {
-            OrderService.OrderPreview preview = orderService.previewOrder(memberId, zip, expedite);
-            return Response.ok(preview).build();
-        } catch (Exception e) {
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                .entity("Could not preview order: " + e.getMessage())
-                .build();
-        }
+        OrderService.OrderPreview preview = orderService.previewOrder(memberId, zip, expedite);
+        return ResponseEntity.ok(preview);
     }
 
     /**
-     * POST /orders/submit/{memberId}?zip=XXXXX&expedite=true|false
-     * Submits the order via the process_order() stored procedure.
-     * Returns the new order ID.
+     * POST /api/orders/submit/{memberId}?zip=XXXXX&amp;expedite=true|false — submits the order and
+     * returns 201 with {@code {"orderId": N}}. A missing {@code zip} yields 400; member-not-found and
+     * empty-cart failures propagate to {@link RestExceptionHandler}.
      */
-    @POST
-    @Path("/submit/{memberId}")
-    public Response submitOrder(
-            @PathParam("memberId") Long memberId,
-            @QueryParam("zip") String zip,
-            @QueryParam("expedite") @DefaultValue("false") boolean expedite) {
+    @PostMapping("/submit/{memberId}")
+    public ResponseEntity<?> submitOrder(
+            @PathVariable("memberId") Long memberId,
+            @RequestParam(value = "zip", required = false) String zip,
+            @RequestParam(value = "expedite", defaultValue = "false") boolean expedite) {
         if (zip == null || zip.isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity("zip query parameter is required")
-                .build();
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("zip query parameter is required");
         }
-        try {
-            Long orderId = orderService.submitOrder(memberId, zip, expedite);
-            return Response.status(Response.Status.CREATED)
-                .entity(Map.of("orderId", orderId))
-                .build();
-        } catch (Exception e) {
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                .entity("Could not submit order: " + e.getMessage())
-                .build();
-        }
+        Long orderId = orderService.submitOrder(memberId, zip, expedite);
+        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("orderId", orderId));
     }
 
     /**
-     * GET /orders/{orderId}
-     * Returns a single order by ID, or 404 if not found.
+     * GET /api/orders/{orderId} — returns a single order by ID, or 404 if not found.
      */
-    @GET
-    @Path("/{orderId}")
-    public Response getOrder(@PathParam("orderId") Long orderId) {
+    @GetMapping("/{orderId}")
+    public ResponseEntity<?> getOrder(@PathVariable("orderId") Long orderId) {
         Order order = orderService.getOrder(orderId);
         if (order == null) {
-            return Response.status(Response.Status.NOT_FOUND)
-                .entity("Order not found: " + orderId)
-                .build();
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Order not found: " + orderId);
         }
-        return Response.ok(order).build();
+        return ResponseEntity.ok(order);
     }
 
     /**
-     * GET /orders/member/{memberId}
-     * Returns the order history for a member.
+     * GET /api/orders/member/{memberId} — returns the order history for a member.
      */
-    @GET
-    @Path("/member/{memberId}")
-    public Response getOrderHistory(@PathParam("memberId") Long memberId) {
-        List<Order> orders = orderService.getOrderHistory(memberId);
-        return Response.ok(orders).build();
+    @GetMapping("/member/{memberId}")
+    public ResponseEntity<List<Order>> getOrderHistory(@PathVariable("memberId") Long memberId) {
+        return ResponseEntity.ok(orderService.getOrderHistory(memberId));
     }
 }

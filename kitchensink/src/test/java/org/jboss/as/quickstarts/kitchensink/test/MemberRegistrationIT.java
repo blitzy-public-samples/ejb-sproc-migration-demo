@@ -16,54 +16,44 @@
  */
 package org.jboss.as.quickstarts.kitchensink.test;
 
-import static org.junit.Assert.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-import java.util.logging.Logger;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.annotation.Transactional;
 
-import jakarta.inject.Inject;
-
-import org.jboss.arquillian.container.test.api.Deployment;
-import org.jboss.arquillian.junit.Arquillian;
 import org.jboss.as.quickstarts.kitchensink.model.Member;
 import org.jboss.as.quickstarts.kitchensink.service.MemberRegistration;
-import org.jboss.as.quickstarts.kitchensink.util.Resources;
-import org.jboss.shrinkwrap.api.Archive;
-import org.jboss.shrinkwrap.api.ShrinkWrap;
-import org.jboss.shrinkwrap.api.asset.StringAsset;
-import org.jboss.shrinkwrap.api.spec.WebArchive;
-import org.junit.Test;
-import org.junit.runner.RunWith;
 
-@RunWith(Arquillian.class)
-public class MemberRegistrationIT {
-    @Deployment
-    public static Archive<?> createTestArchive() {
-        return ShrinkWrap.create(WebArchive.class, "test.war")
-            .addClasses(Member.class, MemberRegistration.class, Resources.class)
-            .addAsResource("META-INF/test-persistence.xml", "META-INF/persistence.xml")
-            .addAsWebInfResource(new StringAsset("<beans xmlns=\"https://jakarta.ee/xml/ns/jakartaee\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n"
-                        + "xsi:schemaLocation=\"https://jakarta.ee/xml/ns/jakartaee https://jakarta.ee/xml/ns/jakartaee/beans_3_0.xsd\"\n"
-                        + "bean-discovery-mode=\"all\">\n"
-                        + "</beans>"), "beans.xml")
-            // Deploy our test datasource
-            .addAsWebInfResource("test-ds.xml");
-    }
+/**
+ * Integration test for {@link MemberRegistration}.
+ *
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): rewritten from Arquillian/JUnit 4 to
+ * {@code @SpringBootTest} + JUnit 5, with the collaborator {@code @Autowired}. The test is
+ * {@code @Transactional} (rolled back), so {@code jane@mailinator.com} is NOT committed here — that email
+ * is committed by {@link RemoteMemberRegistrationIT} (which performs a real HTTP POST and therefore cannot
+ * roll back). Because Failsafe runs the integration tests in alphabetical order, this test (M) runs before
+ * the remote test (R), so the rollback prevents a duplicate-email collision in the shared test database.</p>
+ */
+@SpringBootTest
+@ActiveProfiles("test")
+@Transactional
+class MemberRegistrationIT {
 
-    @Inject
-    MemberRegistration memberRegistration;
-
-    @Inject
-    Logger log;
+    @Autowired
+    private MemberRegistration memberRegistration;
 
     @Test
-    public void testRegister() throws Exception {
+    void testRegister() {
         Member newMember = new Member();
         newMember.setName("Jane Doe");
         newMember.setEmail("jane@mailinator.com");
         newMember.setPhoneNumber("2125551234");
-        memberRegistration.register(newMember);
-        assertNotNull(newMember.getId());
-        log.info(newMember.getName() + " was persisted with id " + newMember.getId());
-    }
 
+        memberRegistration.register(newMember);
+
+        assertNotNull(newMember.getId(), "Member should be persisted with a generated id");
+    }
 }

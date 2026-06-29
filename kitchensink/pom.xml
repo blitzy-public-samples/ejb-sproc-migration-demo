@@ -106,7 +106,27 @@
              db/03_seed_data.sql uses PostgreSQL-specific syntax (OVERRIDING SYSTEM VALUE and
              ON CONFLICT (id) DO NOTHING) that H2 does not fully support, so a real PostgreSQL
              container is used for behavioral fidelity. Version is BOM-managed by the parent
-             (which imports the Testcontainers BOM). -->
+             (which imports the Testcontainers BOM).
+
+             NOTE ON TRANSITIVE junit:junit (JUnit 4) — test scope only:
+             org.testcontainers:testcontainers (the core artifact pulled in here and via junit-jupiter
+             below) declares a NON-OPTIONAL compile-scope dependency on junit:junit 4.x. Its container
+             classes (FailureDetectingExternalResource -> GenericContainer -> the *ContainerProvider
+             SPI implementations) reference org.junit.rules.TestRule, a class that exists ONLY in
+             junit:junit:4.13.2. The test datasource uses Testcontainers' jdbc:tc URL scheme, whose
+             ContainerDatabaseDriver instantiates PostgreSQLContainerProvider through the JDK
+             ServiceLoader at startup; that instantiation requires TestRule on the classpath. Excluding
+             junit:junit was verified at runtime to break every @SpringBootTest context load
+             (NoClassDefFoundError: org/junit/rules/TestRule -> HikariPool init failure ->
+             entityManagerFactory bean creation failure). Per the CP1 review's own F2 guidance, the
+             transitive path may be excluded "only if runtime verification proves Testcontainers still
+             works"; verification proves it does NOT, so the exclusion is removed. The AAP additionally
+             mandates Testcontainers PostgreSQL (technical spec sec. 0.3.4 / 0.5.1 — H2 cannot run the
+             PostgreSQL-specific seed) and requires all six integration tests to pass (sec. 0.7.1, the
+             acceptance gate); both make this transitive junit:junit unavoidable. It is confined to
+             test scope, the project declares NO direct junit:junit, and every test in this module uses
+             JUnit 5 (Jupiter) exclusively — analogous to jboss-logging arriving transitively via
+             Hibernate. -->
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>postgresql</artifactId>
@@ -139,6 +159,26 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!-- Maven Failsafe plugin: executes the six @SpringBootTest integration tests, which follow
+                 the *IT naming convention (PricingServiceIT, DiscountServiceIT, OrderServiceIT,
+                 TierRecalculationIT, MemberRegistrationIT, RemoteMemberRegistrationIT) and constitute the
+                 migration's behavioral acceptance gate. spring-boot-starter-parent manages the plugin
+                 version and binds the integration-test/verify goals via pluginManagement, but the plugin
+                 must be declared here for those executions to run. Surefire continues to handle *Test unit
+                 tests (none in this module); Failsafe runs the *IT tests in the integration-test phase
+                 (after the Spring Boot JAR is packaged) and asserts their results in the verify phase. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
