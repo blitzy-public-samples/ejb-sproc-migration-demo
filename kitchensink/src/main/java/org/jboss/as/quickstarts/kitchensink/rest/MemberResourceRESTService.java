@@ -16,6 +16,7 @@
  */
 package org.jboss.as.quickstarts.kitchensink.rest;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 import jakarta.validation.Valid;
@@ -105,6 +106,17 @@ public class MemberResourceRESTService {
         if (repository.findByEmail(member.getEmail()).isPresent()) {
             throw new RestExceptionHandler.DuplicateEmailException();
         }
+
+        // SECURITY — Mass assignment / over-posting (CWE-915): @RequestBody binds the FULL Member entity,
+        // which also exposes server-controlled fields (id, tier, total_spend, tier_updated_at). Registration
+        // accepts only name/email/phoneNumber from the client; force every server-owned field to its default
+        // here so a client cannot over-post them (e.g. tier="PLATINUM" or a non-zero total_spend would
+        // otherwise skew discount/tier behavior). id is nulled so save() always INSERTs a fresh row instead
+        // of risking a merge onto an existing member.
+        member.setId(null);
+        member.setTier("BRONZE");
+        member.setTotalSpend(BigDecimal.ZERO);
+        member.setTierUpdatedAt(null);
 
         registration.register(member);
 

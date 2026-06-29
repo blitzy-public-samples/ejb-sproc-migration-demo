@@ -233,7 +233,17 @@ public class OrderService {
 
             Long vendorId = vendorSelectionService.selectBestVendor(productId, quantity);
             if (vendorId == null) {
-                continue; // no vendor with stock; skip (preserves current preview behavior)
+                // BEHAVIOR PRESERVATION (AAP §0.7.1 "preserve observable behavior"): process_order does NOT
+                // skip an unfulfillable line. The SP assigns v_vendor_id := select_best_vendor(...) and then
+                // immediately calls calculate_price(product_id, NULL, qty); with a NULL vendor no
+                // vendor_inventory row matches, so calculate_price RAISEs ERRCODE 'P0001' and the whole order
+                // aborts. Mirror that here: a draft line with no selectable vendor (no inventory with stock)
+                // fails the entire preview/submit with InventoryNotFoundException (mapped to 404 by
+                // RestExceptionHandler) instead of silently dropping the line — which could otherwise yield a
+                // partial or effectively empty order.
+                throw new InventoryNotFoundException(
+                    "No vendor with available inventory for product " + productId
+                        + " (requested quantity " + quantity + ")");
             }
             BigDecimal unitPrice = pricingService.calculatePrice(productId, vendorId, quantity);
             BigDecimal lineTotal = unitPrice.multiply(BigDecimal.valueOf(quantity)).setScale(2, RoundingMode.HALF_UP);

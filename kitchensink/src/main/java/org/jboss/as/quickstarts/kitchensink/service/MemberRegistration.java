@@ -45,7 +45,7 @@ public class MemberRegistration {
 
     @Transactional
     public void register(Member member) {
-        log.info("Registering " + member.getName());
+        log.info("Registering {}", member.getName());
         memberRepository.save(member);
     }
 }

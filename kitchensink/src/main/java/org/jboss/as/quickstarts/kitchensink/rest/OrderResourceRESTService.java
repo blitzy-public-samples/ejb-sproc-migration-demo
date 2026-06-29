@@ -54,8 +54,19 @@ public class OrderResourceRESTService {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body("Request body must contain productId and quantity");
         }
-        Long productId = ((Number) body.get("productId")).longValue();
-        int quantity = ((Number) body.get("quantity")).intValue();
+        // SECURITY / input validation (CWE-20): the body stays a Map<String,Object> for PHP-client
+        // compatibility (the storefront posts {"productId":N,"quantity":N}), but the values MUST be
+        // type-checked before casting. A raw (Number) cast throws ClassCastException — and a null value an
+        // NPE — for malformed JSON (a string, boolean, null, or nested object), surfacing as an HTTP 500
+        // instead of a clean 4xx. instanceof Number is false for null, so this also rejects null values.
+        Object productIdRaw = body.get("productId");
+        Object quantityRaw = body.get("quantity");
+        if (!(productIdRaw instanceof Number) || !(quantityRaw instanceof Number)) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("productId and quantity must be numeric");
+        }
+        Long productId = ((Number) productIdRaw).longValue();
+        int quantity = ((Number) quantityRaw).intValue();
         if (quantity <= 0) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body("quantity must be greater than zero");

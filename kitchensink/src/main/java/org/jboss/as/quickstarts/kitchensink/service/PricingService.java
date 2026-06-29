@@ -81,7 +81,17 @@ public class PricingService {
                 "No vendor inventory found for product " + productId + " vendor " + vendorId));
 
         BigDecimal basePrice = product.getBasePrice();           // base_price  NUMERIC(12,4)
-        BigDecimal markupPercent = inventory.getMarkupPercent(); // markup_percent NUMERIC(6,2)
+        BigDecimal markupPercent = inventory.getMarkupPercent(); // markup_percent NUMERIC(6,2) — nullable
+
+        // DEFENSIVE GUARD: vendor_inventory.markup_percent is NULLABLE in db/01_schema.sql (the column has no
+        // NOT NULL constraint and VendorInventory.markupPercent carries no @NotNull). Seed data always
+        // populates it, so this never triggers under the acceptance suite, but a null row would otherwise
+        // throw a NullPointerException at the markupFactor multiply below. Treat a null markup as 0% (no
+        // markup) to produce predictable pricing instead of an NPE. This introduces no field — the service
+        // remains a stateless shared singleton (AAP §0.6.3).
+        if (markupPercent == null) {
+            markupPercent = BigDecimal.ZERO;
+        }
 
         // Volume-discount tiers (exact decimals), mirroring the SQL IF/ELSIF ladder:
         // qty >= 100 -> 0.15, >= 50 -> 0.10, >= 20 -> 0.05, >= 10 -> 0.02, otherwise 0.
