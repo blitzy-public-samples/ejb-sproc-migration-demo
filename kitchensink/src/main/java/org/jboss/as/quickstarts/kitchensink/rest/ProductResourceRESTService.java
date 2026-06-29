@@ -2,6 +2,7 @@ package org.jboss.as.quickstarts.kitchensink.rest;
 
 import java.math.BigDecimal;
 import java.util.List;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -86,6 +87,12 @@ public class ProductResourceRESTService {
     public ResponseEntity<?> getVendorsForProduct(
             @PathVariable("id") Long id,
             @RequestParam(value = "quantity", defaultValue = "1") int quantity) {
+        // SECURITY / input validation (CWE-20, F5): a zero or negative quantity is nonsensical and would
+        // otherwise flow into vendor selection/pricing. Reject it with a 400 before any lookup.
+        if (quantity <= 0) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("quantity must be greater than zero");
+        }
         if (productRepository.findById(id).isEmpty()) {
             return ResponseEntity.notFound().build();
         }
@@ -102,14 +109,22 @@ public class ProductResourceRESTService {
      * A missing product/vendor/inventory combination makes {@link PricingService#calculatePrice}
      * raise a not-found exception that the global {@code RestExceptionHandler} maps to 404 — so this
      * method neither validates existence inline nor catches the exception. {@code quantity} defaults
-     * to 1. The raw {@link BigDecimal} unit price is returned (serialized as a JSON number),
-     * preserving the legacy response body exactly.</p>
+     * to 1 and must be positive (a zero/negative value yields 400, see below). On success the raw
+     * {@link BigDecimal} unit price is returned (serialized as a JSON number), preserving the legacy
+     * response body exactly. The return type is {@code ResponseEntity<?>} so the success body (a
+     * {@code BigDecimal}) and the validation error body (a message string) can coexist.</p>
      */
     @GetMapping("/{id}/price")
-    public ResponseEntity<BigDecimal> getPrice(
+    public ResponseEntity<?> getPrice(
             @PathVariable("id") Long id,
             @RequestParam("vendorId") Long vendorId,
             @RequestParam(value = "quantity", defaultValue = "1") int quantity) {
+        // SECURITY / input validation (CWE-20, F5): reject a zero/negative quantity with a 400 before
+        // pricing. The happy path below still returns the BigDecimal unit price exactly as before.
+        if (quantity <= 0) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("quantity must be greater than zero");
+        }
         BigDecimal unitPrice = pricingService.calculatePrice(id, vendorId, quantity);
         return ResponseEntity.ok(unitPrice);
     }

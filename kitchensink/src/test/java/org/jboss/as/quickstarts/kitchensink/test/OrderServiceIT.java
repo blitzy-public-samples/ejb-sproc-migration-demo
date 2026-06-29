@@ -7,6 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 
+import jakarta.persistence.EntityManagerFactory;
+
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderDraftItemRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderRepository;
@@ -44,6 +48,9 @@ public class OrderServiceIT {
 
     @Autowired
     private MemberRepository memberRepository;
+
+    @Autowired
+    private EntityManagerFactory entityManagerFactory;
 
     @BeforeEach
     public void cleanCartBefore() {
@@ -124,5 +131,70 @@ public class OrderServiceIT {
 
         assertTrue(spendAfter.compareTo(spendBefore) > 0,
             "total_spend should increase after submitOrder()");
+    }
+
+    /**
+     * Test 6 (correctness): a multi-line cart preview must produce one line per cart entry, each with a
+     * selected vendor and positive unit price/line total, and a subtotal equal to the exact sum of the
+     * per-line totals. This guards the batch/projection orchestration refactor (the order-orchestration
+     * N+1 fix) against any per-line accumulation error.
+     */
+    @Test
+    public void testMultiLineCartPreviewComputesPerLineTotals() {
+        orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
+        orderService.addToCart(TEST_MEMBER_ID, 3L, 10);
+        orderService.addToCart(TEST_MEMBER_ID, 5L, 2);
+
+        OrderService.OrderPreview preview = orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false);
+
+        assertNotNull(preview, "Preview should not be null");
+        assertEquals(3, preview.getItems().size(), "Preview should contain one line per cart entry");
+
+        BigDecimal sumOfLines = BigDecimal.ZERO;
+        for (OrderService.LineItemPreview line : preview.getItems()) {
+            assertNotNull(line.getVendorId(), "Each line must have a selected vendor");
+            assertTrue(line.getUnitPrice().compareTo(BigDecimal.ZERO) > 0,
+                "Each line unit price must be > 0");
+            assertTrue(line.getLineTotal().compareTo(BigDecimal.ZERO) > 0,
+                "Each line total must be > 0");
+            sumOfLines = sumOfLines.add(line.getLineTotal());
+        }
+        // Subtotal must equal the sum of the per-line totals (batch refactor must not corrupt accumulation).
+        assertEquals(0, preview.getSubtotal().compareTo(sumOfLines),
+            "Subtotal must equal the sum of per-line totals");
+    }
+
+    /**
+     * Test 7 (performance regression guard): order orchestration must NOT exhibit N+1 query
+     * amplification. The seed data stocks every product at all five vendors, so the former
+     * per-candidate implementation issued roughly {@code 2N+1} queries PER LINE (≈19/line, ≈60 for this
+     * three-line cart): one inventory lookup, then per candidate a {@code calculate_price} that reloaded
+     * product + inventory plus a per-candidate vendor lookup, then a redundant re-price and a per-line
+     * product weight reload. The batch/projection implementation issues a bounded number of statements
+     * that does NOT grow with the vendor count — one candidate-projection query per line, a single batch
+     * product-weight load, and the fixed member/discount/shipping reads plus one audit insert. We assert
+     * a robust ceiling well below the old count; a breach signals the N+1 pattern has returned.
+     */
+    @Test
+    public void testMultiLineCartPreviewDoesNotScalePerVendor() {
+        orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
+        orderService.addToCart(TEST_MEMBER_ID, 3L, 10);
+        orderService.addToCart(TEST_MEMBER_ID, 5L, 2);
+
+        Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        statistics.setStatisticsEnabled(true);
+        statistics.clear();
+
+        OrderService.OrderPreview preview = orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false);
+
+        assertNotNull(preview, "Preview should not be null");
+        assertEquals(3, preview.getItems().size(), "Preview should contain one line per cart entry");
+
+        long statements = statistics.getPrepareStatementCount();
+        // New implementation is ≈10-13 statements for a 3-line cart; the old per-candidate path was ≈60.
+        // A ceiling of 20 cleanly separates the two while leaving headroom against incidental variation.
+        assertTrue(statements < 20,
+            "Order preview should not exhibit N+1 query amplification; prepared statements="
+                + statements + " (expected < 20)");
     }
 }

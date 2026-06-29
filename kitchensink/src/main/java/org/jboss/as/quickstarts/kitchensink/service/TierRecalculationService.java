@@ -2,6 +2,10 @@ package org.jboss.as.quickstarts.kitchensink.service;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -121,19 +125,37 @@ public class TierRecalculationService {
     private void recalculateAll() {
         // SQL: o.created_at >= NOW() - INTERVAL '90 days'.
         LocalDateTime cutoff = LocalDateTime.now().minusDays(90);
+
+        // ONE grouped aggregate query for ALL members' 90-day CONFIRMED spend, replacing the former
+        // per-member orderRepository.sumConfirmedTotalSince(...) call (an N+1 aggregate pattern that
+        // issued one query per member and became pathological at scale). Members with NO qualifying
+        // CONFIRMED orders in the window are simply absent from the result and are defaulted to zero
+        // in memory below — preserving the stored procedure's COALESCE(SUM(o.total), 0) semantics.
+        Map<Long, BigDecimal> spendByMember = new HashMap<>();
+        for (OrderRepository.MemberSpendProjection row : orderRepository.sumConfirmedTotalsByMemberSince(cutoff)) {
+            BigDecimal spend = row.getTotalSpend();
+            spendByMember.put(row.getMemberId(), spend != null ? spend : BigDecimal.ZERO);
+        }
+
+        // Recompute each member's tier from the preloaded spend map and collect ONLY those whose tier
+        // actually changes (SQL: WHERE tier IS DISTINCT FROM new_tier), then persist them in a single
+        // batch save. A single timestamp is used for every change in this run, mirroring the stored
+        // procedure's NOW() which is constant within its transaction.
+        List<Member> changed = new ArrayList<>();
+        LocalDateTime updatedAt = LocalDateTime.now();
         for (Member member : memberRepository.findAll()) {
-            // SQL: SELECT COALESCE(SUM(o.total), 0) ... WHERE status = 'CONFIRMED' AND created_at >= cutoff.
-            BigDecimal spend90d = orderRepository.sumConfirmedTotalSince(member.getId(), cutoff);
-            if (spend90d == null) {
-                spend90d = BigDecimal.ZERO; // COALESCE(SUM(total), 0) — defensive null guard.
-            }
+            // COALESCE(SUM(total), 0): absent member -> 0 (no qualifying orders in the 90-day window).
+            BigDecimal spend90d = spendByMember.getOrDefault(member.getId(), BigDecimal.ZERO);
             String newTier = tierForSpend(spend90d);
-            // UPDATE only when the tier actually changes (SQL: WHERE tier IS DISTINCT FROM new_tier).
             if (!newTier.equals(member.getTier())) {
                 member.setTier(newTier);
-                member.setTierUpdatedAt(LocalDateTime.now());
-                memberRepository.save(member);
+                member.setTierUpdatedAt(updatedAt);
+                changed.add(member);
             }
+        }
+        // Batch-save only the members whose tier changed (no write at all when nothing changed).
+        if (!changed.isEmpty()) {
+            memberRepository.saveAll(changed);
         }
     }
 

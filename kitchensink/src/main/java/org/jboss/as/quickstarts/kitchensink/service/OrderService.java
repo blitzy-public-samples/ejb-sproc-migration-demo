@@ -4,7 +4,9 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -51,7 +53,6 @@ import org.jboss.as.quickstarts.kitchensink.model.Product;
 public class OrderService {
 
     private final VendorSelectionService vendorSelectionService;
-    private final PricingService pricingService;
     private final DiscountService discountService;
     private final ShippingService shippingService;
     private final OrderRepository orderRepository;
@@ -61,14 +62,16 @@ public class OrderService {
     private final ProductRepository productRepository;
 
     /**
-     * Constructor injection of the nine collaborators (replaces CDI {@code @Inject} field injection).
-     * A single constructor is wired by Spring automatically, so no {@code @Autowired} is required. The
-     * dependency graph is acyclic: {@link PricingService} is a stateless shared leaf depending only on
-     * repositories (AAP §0.6.3), so it is safely shared with {@link DiscountService} and
-     * {@link VendorSelectionService}.
+     * Constructor injection of the eight collaborators (replaces CDI {@code @Inject} field injection).
+     * A single constructor is wired by Spring automatically, so no {@code @Autowired} is required.
+     *
+     * <p>{@code OrderService} no longer injects {@code PricingService} directly: after the
+     * order-orchestration N+1 fix, {@link VendorSelectionService#selectBestVendorWithPrice} returns the
+     * winning vendor together with its already-computed unit price, so the order pipeline never prices a
+     * line itself. {@link PricingService} remains a stateless shared leaf (AAP §0.6.3), now shared by
+     * {@link VendorSelectionService} and {@link DiscountService}; the dependency graph stays acyclic.</p>
      */
     public OrderService(VendorSelectionService vendorSelectionService,
-                        PricingService pricingService,
                         DiscountService discountService,
                         ShippingService shippingService,
                         OrderRepository orderRepository,
@@ -77,7 +80,6 @@ public class OrderService {
                         OrderDraftItemRepository orderDraftItemRepository,
                         ProductRepository productRepository) {
         this.vendorSelectionService = vendorSelectionService;
-        this.pricingService = pricingService;
         this.discountService = discountService;
         this.shippingService = shippingService;
         this.orderRepository = orderRepository;
@@ -96,6 +98,20 @@ public class OrderService {
      */
     @Transactional
     public void addToCart(Long memberId, Long productId, int quantity) {
+        // SECURITY / input validation (F4): verify the referenced member and product EXIST before
+        // inserting a draft row. The model uses plain Long foreign keys (no JPA associations) and
+        // order_draft_items is FK-constrained to members(id)/products(id); inserting an unknown id would
+        // otherwise fail deep in the database and surface as an opaque HTTP 500. Surfacing the not-found
+        // condition here as MemberNotFoundException / InventoryNotFoundException yields a clean 404 via
+        // RestExceptionHandler. existsById is a cheap existence probe (no entity hydration). Centralizing
+        // the check in the service also protects any non-REST caller, not just the controller.
+        if (!memberRepository.existsById(memberId)) {
+            throw new MemberNotFoundException("Member not found: " + memberId);
+        }
+        if (!productRepository.existsById(productId)) {
+            throw new InventoryNotFoundException("Product not found: " + productId);
+        }
+
         // Preserve current behavior: insert a new draft row (no upsert). em.persist -> repository.save.
         OrderDraftItem item = new OrderDraftItem();
         item.setMemberId(memberId);
@@ -223,7 +239,24 @@ public class OrderService {
             throw new EmptyCartException("Cart is empty for member " + memberId);
         }
 
-        // 3. Per draft line: best vendor -> unit price -> line total; accumulate subtotal + weight.
+        // 3. Batch-load every draft product ONCE for weight lookup. This replaces the former
+        // per-line productRepository.findById(...) inside the loop (part of the order-orchestration
+        // N+1 fix). COALESCE(weight_lbs, 0) is applied as each product is mapped; absent products
+        // simply do not appear in the map (a line whose product has no stocked vendor fails below via
+        // InventoryNotFoundException before its weight would ever be needed).
+        List<Long> productIds = new ArrayList<>();
+        for (OrderDraftItem draftItem : draftItems) {
+            productIds.add(draftItem.getProductId());
+        }
+        Map<Long, BigDecimal> weightByProduct = new HashMap<>();
+        for (Product product : productRepository.findAllById(productIds)) {
+            BigDecimal weight = product.getWeightLbs();
+            weightByProduct.put(product.getId(), weight != null ? weight : BigDecimal.ZERO);
+        }
+
+        // 4. Per draft line: best vendor AND its unit price come back from ONE projection query (no
+        // per-candidate calculate_price reloads and no per-candidate vendor lookups); line total and
+        // weight are computed from already-loaded data. Accumulate subtotal + total weight.
         BigDecimal subtotal = BigDecimal.ZERO;
         BigDecimal totalWeight = BigDecimal.ZERO;
         List<LineItemPreview> lineItems = new ArrayList<>();
@@ -231,8 +264,9 @@ public class OrderService {
             Long productId = draftItem.getProductId();
             int quantity = draftItem.getQuantity();
 
-            Long vendorId = vendorSelectionService.selectBestVendor(productId, quantity);
-            if (vendorId == null) {
+            VendorSelectionService.VendorSelection selection =
+                vendorSelectionService.selectBestVendorWithPrice(productId, quantity);
+            if (selection == null) {
                 // BEHAVIOR PRESERVATION (AAP §0.7.1 "preserve observable behavior"): process_order does NOT
                 // skip an unfulfillable line. The SP assigns v_vendor_id := select_best_vendor(...) and then
                 // immediately calls calculate_price(product_id, NULL, qty); with a NULL vendor no
@@ -245,27 +279,25 @@ public class OrderService {
                     "No vendor with available inventory for product " + productId
                         + " (requested quantity " + quantity + ")");
             }
-            BigDecimal unitPrice = pricingService.calculatePrice(productId, vendorId, quantity);
+            Long vendorId = selection.getVendorId();
+            // Unit price was computed during selection from the same base price + markup that
+            // calculatePrice(productId, vendorId, quantity) would load — identical value, no reload.
+            BigDecimal unitPrice = selection.getUnitPrice();
             BigDecimal lineTotal = unitPrice.multiply(BigDecimal.valueOf(quantity)).setScale(2, RoundingMode.HALF_UP);
             subtotal = subtotal.add(lineTotal);
 
-            // COALESCE(weight_lbs, 0) * qty (Product weight is nullable).
-            BigDecimal unitWeight = productRepository.findById(productId)
-                .map(Product::getWeightLbs)
-                .orElse(BigDecimal.ZERO);
-            if (unitWeight == null) {
-                unitWeight = BigDecimal.ZERO;
-            }
+            // COALESCE(weight_lbs, 0) * qty from the preloaded weight map (Product weight is nullable).
+            BigDecimal unitWeight = weightByProduct.getOrDefault(productId, BigDecimal.ZERO);
             totalWeight = totalWeight.add(unitWeight.multiply(BigDecimal.valueOf(quantity)));
 
             lineItems.add(new LineItemPreview(productId, vendorId, quantity, unitPrice, lineTotal));
         }
 
-        // 4. Discount (writes EXACTLY ONE discount_audit row via DiscountService).
+        // 5. Discount (writes EXACTLY ONE discount_audit row via DiscountService).
         BigDecimal discountAmount = discountService.calculateDiscount(memberId, subtotal);
-        // 5. Shipping on accumulated weight.
+        // 6. Shipping on accumulated weight.
         BigDecimal shippingCost = shippingService.calculateShipping(destinationZip, totalWeight, expedite);
-        // 6. total = subtotal - discount + shipping.
+        // 7. total = subtotal - discount + shipping.
         BigDecimal total = subtotal.subtract(discountAmount).add(shippingCost).setScale(2, RoundingMode.HALF_UP);
 
         return new OrderPreview(subtotal, discountAmount, shippingCost, total, lineItems);

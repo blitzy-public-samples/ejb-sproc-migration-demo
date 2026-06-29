@@ -75,7 +75,20 @@ public class ShippingService {
             int start = parseZipPrefix(zone.getZipRangeStart());
             int end = parseZipPrefix(zone.getZipRangeEnd());
             if (start <= zipPrefix && end >= zipPrefix) {
-                baseRate = zone.getBaseRatePerLb();
+                // SEMANTIC PARITY with calculate_shipping (db/02_stored_procedures.sql): the SQL reads
+                // the matched zone's base_rate_per_lb INTO v_base_rate and then applies
+                // "IF v_base_rate IS NULL THEN v_base_rate := 1.50", so the 1.50 default covers BOTH the
+                // no-zone-matched case AND a matched zone whose rate is NULL. shipping_zones.base_rate_per_lb
+                // is NULLABLE in db/01_schema.sql (NUMERIC(6,4), no NOT NULL constraint), so a matched zone
+                // may carry a null rate. Only overwrite the DEFAULT_RATE (1.50) when the matched zone's rate
+                // is non-null; a null matched rate keeps the 1.50 fallback exactly as the procedure does,
+                // instead of assigning null and throwing a NullPointerException at the multiply below.
+                BigDecimal zoneRate = zone.getBaseRatePerLb();
+                if (zoneRate != null) {
+                    baseRate = zoneRate;
+                }
+                // First-match break preserved (mirrors "ORDER BY id LIMIT 1"): selection stops at the
+                // lowest-id bracketing zone whether or not its rate is null.
                 break;
             }
         }

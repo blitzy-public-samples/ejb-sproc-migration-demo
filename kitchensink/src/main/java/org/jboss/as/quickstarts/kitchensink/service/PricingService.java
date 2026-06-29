@@ -80,39 +80,67 @@ public class PricingService {
             .orElseThrow(() -> new InventoryNotFoundException(
                 "No vendor inventory found for product " + productId + " vendor " + vendorId));
 
-        BigDecimal basePrice = product.getBasePrice();           // base_price  NUMERIC(12,4)
-        BigDecimal markupPercent = inventory.getMarkupPercent(); // markup_percent NUMERIC(6,2) — nullable
+        // base_price NUMERIC(12,4); markup_percent NUMERIC(6,2) — nullable. The arithmetic (null-markup
+        // guard, volume tier, rounding) is delegated to the shared, repository-free calculateUnitPrice(...)
+        // below so there is ONE authoritative pricing formula. This repository-backed entry point keeps the
+        // P0001-equivalent not-found contract above; both paths compute identical unit prices.
+        return calculateUnitPrice(product.getBasePrice(), inventory.getMarkupPercent(), quantity);
+    }
 
-        // DEFENSIVE GUARD: vendor_inventory.markup_percent is NULLABLE in db/01_schema.sql (the column has no
-        // NOT NULL constraint and VendorInventory.markupPercent carries no @NotNull). Seed data always
-        // populates it, so this never triggers under the acceptance suite, but a null row would otherwise
-        // throw a NullPointerException at the markupFactor multiply below. Treat a null markup as 0% (no
-        // markup) to produce predictable pricing instead of an NPE. This introduces no field — the service
-        // remains a stateless shared singleton (AAP §0.6.3).
-        if (markupPercent == null) {
-            markupPercent = BigDecimal.ZERO;
-        }
+    /**
+     * Computes a unit price from already-loaded {@code base_price} and {@code markup_percent} values,
+     * performing NO repository access. This is the single authoritative pricing formula, shared by the
+     * repository-backed {@link #calculatePrice(Long, Long, int)} and by
+     * {@code VendorSelectionService}, which prices many candidate vendors from a single projection query
+     * (the order-orchestration N+1 fix) without reloading product/inventory rows per candidate.
+     *
+     * <p>Mirrors the SQL {@code ROUND(base * (1 + markup/100) * (1 - volume_discount), 4)}: the unit
+     * price is rounded to scale 4 with HALF_UP, matching {@code order_items.unit_price NUMERIC(12,4)}.
+     * {@code markup / 100} is expressed as {@code multiply(new BigDecimal("0.01"))} to avoid any
+     * non-terminating-division risk while remaining exact for the schema's scales. A null
+     * {@code markupPercent} (the column is nullable in db/01_schema.sql) is treated as 0% to produce
+     * predictable pricing instead of a NullPointerException.</p>
+     *
+     * <p>Pure function — introduces no field and reads no mutable state, preserving the stateless
+     * shared-singleton contract (AAP §0.6.3).</p>
+     *
+     * @param basePrice      the product's {@code base_price} (must be non-null, as in the schema)
+     * @param markupPercent  the vendor's {@code markup_percent} (nullable -> treated as 0%)
+     * @param quantity       the order quantity (selects the volume-discount tier)
+     * @return               the unit price as a {@link BigDecimal} (scale 4, HALF_UP)
+     */
+    public BigDecimal calculateUnitPrice(BigDecimal basePrice, BigDecimal markupPercent, int quantity) {
+        // DEFENSIVE GUARD: treat a null markup as 0% (no markup) — see method Javadoc.
+        BigDecimal effectiveMarkup = (markupPercent == null) ? BigDecimal.ZERO : markupPercent;
 
-        // Volume-discount tiers (exact decimals), mirroring the SQL IF/ELSIF ladder:
-        // qty >= 100 -> 0.15, >= 50 -> 0.10, >= 20 -> 0.05, >= 10 -> 0.02, otherwise 0.
-        BigDecimal volumeDiscount;
-        if (quantity >= 100) {
-            volumeDiscount = new BigDecimal("0.15");
-        } else if (quantity >= 50) {
-            volumeDiscount = new BigDecimal("0.10");
-        } else if (quantity >= 20) {
-            volumeDiscount = new BigDecimal("0.05");
-        } else if (quantity >= 10) {
-            volumeDiscount = new BigDecimal("0.02");
-        } else {
-            volumeDiscount = BigDecimal.ZERO;
-        }
+        BigDecimal volumeDiscount = volumeDiscountForQuantity(quantity);
 
         // unit = base * (1 + markup/100) * (1 - volumeDiscount), ROUND(..., 4).
-        BigDecimal markupFactor = BigDecimal.ONE.add(markupPercent.multiply(new BigDecimal("0.01")));
+        BigDecimal markupFactor = BigDecimal.ONE.add(effectiveMarkup.multiply(new BigDecimal("0.01")));
         BigDecimal volumeFactor = BigDecimal.ONE.subtract(volumeDiscount);
         return basePrice.multiply(markupFactor).multiply(volumeFactor)
             .setScale(4, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Returns the volume-discount fraction for a quantity, mirroring the SQL IF/ELSIF ladder:
+     * qty &gt;= 100 -&gt; 0.15, &gt;= 50 -&gt; 0.10, &gt;= 20 -&gt; 0.05, &gt;= 10 -&gt; 0.02, otherwise 0.
+     * Exact decimals are used so the multiplication remains exact at the schema's scale.
+     *
+     * @param quantity the order quantity
+     * @return the volume-discount fraction as an exact {@link BigDecimal}
+     */
+    private BigDecimal volumeDiscountForQuantity(int quantity) {
+        if (quantity >= 100) {
+            return new BigDecimal("0.15");
+        } else if (quantity >= 50) {
+            return new BigDecimal("0.10");
+        } else if (quantity >= 20) {
+            return new BigDecimal("0.05");
+        } else if (quantity >= 10) {
+            return new BigDecimal("0.02");
+        }
+        return BigDecimal.ZERO;
     }
 
     /**

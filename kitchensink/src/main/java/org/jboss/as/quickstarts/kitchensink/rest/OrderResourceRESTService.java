@@ -71,6 +71,16 @@ public class OrderResourceRESTService {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body("quantity must be greater than zero");
         }
+        // SECURITY / input validation (CWE-20, F4): reject non-positive identifiers up front with a 400.
+        // memberId is a path variable (Spring already 400s a non-numeric path), but a zero/negative value
+        // is still a malformed request; productId arrives in the body. Non-positive ids are nonsensical and
+        // would otherwise reach the database FK layer and surface as an opaque 500. Resource EXISTENCE
+        // (member/product actually present) is verified in OrderService.addToCart, which raises
+        // MemberNotFoundException / InventoryNotFoundException -> 404 via RestExceptionHandler.
+        if (memberId == null || memberId <= 0 || productId <= 0) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("memberId and productId must be positive");
+        }
         orderService.addToCart(memberId, productId, quantity);
         return ResponseEntity.status(HttpStatus.CREATED).body("Item added to cart");
     }
