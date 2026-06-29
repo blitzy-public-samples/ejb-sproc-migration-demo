@@ -1,36 +1,28 @@
 package org.jboss.as.quickstarts.kitchensink.data;
 
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-import jakarta.persistence.EntityManager;
 import java.util.List;
+import java.util.Optional;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
 import org.jboss.as.quickstarts.kitchensink.model.Product;
 
-@ApplicationScoped
-public class ProductRepository {
+/**
+ * Spring Data JPA repository for {@link Product}.
+ *
+ * Migrated from a Jakarta EE CDI bean (@ApplicationScoped + @Inject EntityManager + JPQL) to a
+ * Spring Data interface. CRUD inherited from JpaRepository; custom finders below are derived queries.
+ */
+public interface ProductRepository extends JpaRepository<Product, Long> {
 
-    @Inject
-    private EntityManager em;
+    // Was findBySku(...) via JPQL getSingleResult. Now derived, returns Optional<Product>.
+    Optional<Product> findBySku(String sku);
 
-    public Product findById(Long id) {
-        return em.find(Product.class, id);
-    }
+    // Was findByCategory(...) via JPQL "... WHERE p.category = :category ORDER BY p.name".
+    List<Product> findByCategoryOrderByNameAsc(String category);
 
-    public Product findBySku(String sku) {
-        return em.createQuery("SELECT p FROM Product p WHERE p.sku = :sku", Product.class)
-            .setParameter("sku", sku)
-            .getSingleResult();
-    }
-
-    public List<Product> findAll() {
-        return em.createQuery("SELECT p FROM Product p ORDER BY p.name", Product.class)
-            .getResultList();
-    }
-
-    public List<Product> findByCategory(String category) {
-        return em.createQuery(
-                "SELECT p FROM Product p WHERE p.category = :category ORDER BY p.name", Product.class)
-            .setParameter("category", category)
-            .getResultList();
-    }
+    // Was findAll() via JPQL "SELECT p FROM Product p ORDER BY p.name" (name-ordered).
+    // JpaRepository.findAll() exists but is UNORDERED, so this explicit name-ordered finder is kept
+    // to preserve the prior ordering contract for the products listing endpoint.
+    List<Product> findAllByOrderByNameAsc();
 }
