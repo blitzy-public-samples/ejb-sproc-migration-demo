@@ -2,7 +2,7 @@ package org.jboss.as.quickstarts.kitchensink.service;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -10,147 +10,147 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
 import org.jboss.as.quickstarts.kitchensink.data.OrderRepository;
 import org.jboss.as.quickstarts.kitchensink.model.Member;
 
 /**
- * TierRecalculationService — recomputes each member's loyalty tier from their trailing 90-day
- * CONFIRMED-order spend, re-implementing the {@code recalculate_customer_tiers()} PL/pgSQL
- * procedure in Java.
+ * TierRecalculationService — embodies the {@code recalculate_customer_tiers} PL/pgSQL function
+ * (db/02_stored_procedures.sql L295-326), now re-expressed entirely in Java.
  *
- * <p>Tier thresholds based on 90-day rolling spend (identical to the stored procedure):</p>
+ * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 → Spring Boot 3.x): the former EJB
+ * {@code @Singleton @Startup} bean with an {@code @Schedule(hour = "2")} container timer and a
+ * {@code @TransactionAttribute(REQUIRED)} demarcation has been replaced by Spring stereotypes and
+ * scheduling. Specifically:
  * <ul>
- *   <li>PLATINUM &ge; $5,000</li>
- *   <li>GOLD     &ge; $2,000</li>
- *   <li>SILVER   &ge; $500</li>
- *   <li>BRONZE   &lt; $500</li>
+ *   <li>{@code @Singleton}/{@code @Startup} EJB → {@code @Service} singleton bean;</li>
+ *   <li>{@code @Schedule(hour = "2", minute = "0", second = "0")} → {@code @Scheduled(cron = "0 0 2 * * *")}
+ *       (nightly at 02:00);</li>
+ *   <li>{@code @Startup} (run once when the singleton initializes) →
+ *       {@code @EventListener(ApplicationReadyEvent.class)} (run once when the context is ready);</li>
+ *   <li>{@code @TransactionAttribute(REQUIRED)} → Spring {@code @Transactional} at the public entry
+ *       methods;</li>
+ *   <li>{@code @Inject EntityManager} executing {@code SELECT recalculate_customer_tiers()} as a native
+ *       query → injected Spring Data repositories plus the tier logic computed in Java (no native
+ *       stored-procedure call remains);</li>
+ *   <li>CDI-injected {@code java.util.logging.Logger} → SLF4J {@link Logger}.</li>
  * </ul>
+ * {@code @EnableScheduling} lives on {@code KitchensinkApplication} (the root bootstrap class); it is
+ * required for the {@code @Scheduled} nightly job to fire.</p>
  *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): formerly an EJB
- * {@code @Singleton @Startup} bean with an {@code @Schedule(hour="2")} method that delegated to a
- * native {@code SELECT recalculate_customer_tiers()} query. It is now a Spring {@code @Service}:</p>
- * <ul>
- *   <li>{@code @Scheduled(cron="0 0 2 * * *")} replaces {@code @Schedule(hour="2")} for the nightly run.</li>
- *   <li>{@code @EventListener(ApplicationReadyEvent)} replaces {@code @Startup}. IMPORTANT: the legacy
- *       {@code @Startup} singleton performed <em>no work</em> at boot (it had no startup task body); it
- *       merely eagerly instantiated. To preserve that exact behavior, the readiness handler here only
- *       logs — it deliberately does NOT recalculate at startup. Running a recalculation on boot would
- *       overwrite the externally-seeded member tiers (e.g., set the GOLD seed member to BRONZE) and
- *       break the discount/test expectations.</li>
- *   <li>The native procedure call is removed; the loop is performed in Java over Spring Data repositories.</li>
- * </ul>
- *
- * <p>{@code @Transactional} is placed on the externally-invoked entry points
- * ({@link #runNightlyTierRecalculation()} and {@link #triggerRecalculation()}) rather than on the
- * private worker, because Spring's proxy-based transaction advice does not apply to self-invocation.</p>
+ * <p>Tier thresholds on the 90-day rolling CONFIRMED spend (matching the stored procedure's CASE):
+ * BRONZE &lt; 500, SILVER &gt;= 500, GOLD &gt;= 2000, PLATINUM &gt;= 5000.</p>
  */
 @Service
 public class TierRecalculationService {
 
     private static final Logger log = LoggerFactory.getLogger(TierRecalculationService.class);
 
-    /** Trailing window, in days, over which CONFIRMED-order spend is summed. */
-    private static final int SPEND_WINDOW_DAYS = 90;
-
-    private static final BigDecimal PLATINUM_FLOOR = new BigDecimal("5000");
-    private static final BigDecimal GOLD_FLOOR = new BigDecimal("2000");
-    private static final BigDecimal SILVER_FLOOR = new BigDecimal("500");
+    // Tier floors on 90-day CONFIRMED spend, mirroring the SQL CASE in recalculate_customer_tiers.
+    private static final BigDecimal PLATINUM_THRESHOLD = new BigDecimal("5000");
+    private static final BigDecimal GOLD_THRESHOLD     = new BigDecimal("2000");
+    private static final BigDecimal SILVER_THRESHOLD   = new BigDecimal("500");
 
     private final MemberRepository memberRepository;
     private final OrderRepository orderRepository;
 
-    public TierRecalculationService(MemberRepository memberRepository,
-                                    OrderRepository orderRepository) {
+    // Constructor injection (replaces CDI @Inject field injection); no @Autowired needed for a
+    // single constructor. Both collaborators are final/immutable.
+    public TierRecalculationService(MemberRepository memberRepository, OrderRepository orderRepository) {
         this.memberRepository = memberRepository;
         this.orderRepository = orderRepository;
     }
 
     /**
-     * Application-readiness hook replacing the legacy EJB {@code @Startup}. Logs only — it performs
-     * NO recalculation, exactly mirroring the original startup behavior (the legacy singleton ran no
-     * work on boot). Recalculation runs only on the nightly schedule or when explicitly triggered.
+     * Nightly tier recalculation at 02:00.
      *
-     * @param event the application-ready event (unused beyond signaling readiness)
-     */
-    @EventListener(ApplicationReadyEvent.class)
-    public void onApplicationReady(ApplicationReadyEvent event) {
-        log.info("TierRecalculationService: application ready; nightly tier recalculation scheduled for 02:00 "
-                + "(no recalculation performed at startup)");
-    }
-
-    /**
-     * Nightly scheduled recalculation, replacing the EJB {@code @Schedule(hour="2")}.
-     * Runs every day at 02:00 server time.
+     * <p>Replaces the EJB {@code @Schedule(hour = "2", minute = "0", second = "0", persistent = false)}
+     * timer with Spring's cron-based {@code @Scheduled}. Requires {@code @EnableScheduling} (declared on
+     * {@code KitchensinkApplication}).</p>
      */
     @Scheduled(cron = "0 0 2 * * *")
     @Transactional
     public void runNightlyTierRecalculation() {
         log.info("TierRecalculationService: starting nightly tier recalculation");
-        int updated = recalculateAllTiers();
-        log.info("TierRecalculationService: nightly tier recalculation complete ({} member(s) updated)", updated);
+        recalculateAll();
+        log.info("TierRecalculationService: nightly tier recalculation complete");
     }
 
     /**
-     * Manually triggers a full tier recalculation. Used by integration tests and any on-demand
-     * administrative path. {@code @Transactional} so the recalculation runs in a single transaction.
+     * Application-readiness hook replacing the legacy EJB {@code @Startup}.
      *
-     * @return the number of members whose tier changed
+     * <p>The legacy {@code @Singleton @Startup} bean was only eagerly instantiated at deployment and
+     * performed NO recalculation on boot (it declared no {@code @PostConstruct} work); tier
+     * recalculation ran solely on the nightly {@code @Schedule(hour="2")} timer. To preserve that
+     * observable behavior, this method performs no recalculation at startup and only logs readiness.
+     * Recalculation runs on the nightly {@link #runNightlyTierRecalculation()} schedule or via the
+     * explicit {@link #triggerRecalculation()} entry point.</p>
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void onApplicationReady() {
+        log.info("TierRecalculationService: application ready; nightly tier recalculation scheduled for "
+                + "02:00 (no recalculation performed at startup)");
+    }
+
+    /**
+     * Programmatic trigger for an on-demand recalculation.
+     *
+     * <p>Kept public because {@code TierRecalculationIT} invokes it directly to assert tier transitions.</p>
      */
     @Transactional
-    public int triggerRecalculation() {
+    public void triggerRecalculation() {
         log.info("TierRecalculationService: manual recalculation triggered");
-        int updated = recalculateAllTiers();
-        log.info("TierRecalculationService: manual recalculation complete ({} member(s) updated)", updated);
-        return updated;
+        recalculateAll();
+        log.info("TierRecalculationService: manual recalculation complete");
     }
 
     /**
-     * Core recalculation loop (private worker; runs within the caller's transaction). For each
-     * member it sums CONFIRMED order totals over the trailing 90-day window, derives the new tier,
-     * and updates the member only when the tier actually changes — mirroring the stored procedure's
-     * {@code tier IS DISTINCT FROM v_new_tier} guard and {@code tier_updated_at = NOW()} stamp.
+     * Single shared implementation of {@code recalculate_customer_tiers()}.
      *
-     * @return the number of members whose tier changed
+     * <p>Intentionally {@code private}: it runs inside the transaction established by whichever public
+     * caller invoked it. It is NOT annotated {@code @Transactional} because Spring's proxy-based
+     * transaction advice is bypassed on self-invocation (an internal call would not pass through the
+     * proxy), so a {@code @Transactional} here would be silently ineffective.</p>
+     *
+     * <p>For every member, it sums the member's CONFIRMED order totals within the trailing 90 days
+     * (orders older than the cutoff are excluded), derives the tier from that spend, and persists the
+     * change only when the computed tier differs from the stored tier — mirroring the SQL
+     * {@code WHERE tier IS DISTINCT FROM new_tier} guard.</p>
      */
-    private int recalculateAllTiers() {
-        LocalDateTime cutoff = LocalDateTime.now().minusDays(SPEND_WINDOW_DAYS);
-        List<Member> members = memberRepository.findAll();
-        int updatedCount = 0;
-
-        for (Member member : members) {
+    private void recalculateAll() {
+        // SQL: o.created_at >= NOW() - INTERVAL '90 days'.
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(90);
+        for (Member member : memberRepository.findAll()) {
+            // SQL: SELECT COALESCE(SUM(o.total), 0) ... WHERE status = 'CONFIRMED' AND created_at >= cutoff.
             BigDecimal spend90d = orderRepository.sumConfirmedTotalSince(member.getId(), cutoff);
             if (spend90d == null) {
-                spend90d = BigDecimal.ZERO;
+                spend90d = BigDecimal.ZERO; // COALESCE(SUM(total), 0) — defensive null guard.
             }
-            String newTier = determineTier(spend90d);
-
-            // Update only if the tier actually changed (≙ tier IS DISTINCT FROM v_new_tier).
+            String newTier = tierForSpend(spend90d);
+            // UPDATE only when the tier actually changes (SQL: WHERE tier IS DISTINCT FROM new_tier).
             if (!newTier.equals(member.getTier())) {
                 member.setTier(newTier);
                 member.setTierUpdatedAt(LocalDateTime.now());
                 memberRepository.save(member);
-                updatedCount++;
             }
         }
-        return updatedCount;
     }
 
     /**
-     * Maps a 90-day spend amount to a loyalty tier using the stored procedure's thresholds.
+     * Maps a 90-day spend amount to a loyalty tier, matching the stored procedure's CASE expression.
      *
-     * @param spend90d trailing 90-day CONFIRMED-order spend (non-null)
-     * @return one of PLATINUM, GOLD, SILVER, BRONZE
+     * @param spend the trailing-90-day CONFIRMED order spend (never {@code null})
+     * @return the tier name: {@code PLATINUM}, {@code GOLD}, {@code SILVER}, or {@code BRONZE}
      */
-    private String determineTier(BigDecimal spend90d) {
-        if (spend90d.compareTo(PLATINUM_FLOOR) >= 0) {
+    private String tierForSpend(BigDecimal spend) {
+        if (spend.compareTo(PLATINUM_THRESHOLD) >= 0) {
             return "PLATINUM";
-        } else if (spend90d.compareTo(GOLD_FLOOR) >= 0) {
+        } else if (spend.compareTo(GOLD_THRESHOLD) >= 0) {
             return "GOLD";
-        } else if (spend90d.compareTo(SILVER_FLOOR) >= 0) {
+        } else if (spend.compareTo(SILVER_THRESHOLD) >= 0) {
             return "SILVER";
-        } else {
-            return "BRONZE";
         }
+        return "BRONZE";
     }
 }

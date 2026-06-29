@@ -2,7 +2,9 @@ package org.jboss.as.quickstarts.kitchensink.service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+
 import org.springframework.stereotype.Service;
+
 import org.jboss.as.quickstarts.kitchensink.data.ProductRepository;
 import org.jboss.as.quickstarts.kitchensink.data.VendorInventoryRepository;
 import org.jboss.as.quickstarts.kitchensink.model.Product;
@@ -10,30 +12,34 @@ import org.jboss.as.quickstarts.kitchensink.model.VendorInventory;
 import org.jboss.as.quickstarts.kitchensink.model.VendorInventoryId;
 
 /**
- * PricingService — pure-Java re-implementation of the {@code calculate_price(product_id,
- * vendor_id, quantity)} PL/pgSQL stored procedure.
+ * PricingService — embodies the {@code calculate_price} stored procedure
+ * (db/02_stored_procedures.sql L21-61).
  *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): this was a CDI
- * {@code @ApplicationScoped} bean that delegated to the database via a native
- * {@code SELECT calculate_price(...)} query through an injected {@code EntityManager}. The
- * business logic now lives in the application tier per the migration's core objective — no
- * stored procedure is invoked. The bean is a Spring {@code @Service} singleton.</p>
+ * <p>Migrated from Jakarta EE CDI (@ApplicationScoped + @Inject EntityManager + a native
+ * {@code "SELECT calculate_price(...)"} query) to a Spring {@code @Service}. The pricing formula is
+ * now computed in Java from repository-loaded data — there is NO native stored-procedure call and NO
+ * {@code EntityManager}. The stored procedure remains in db/02_stored_procedures.sql only as a
+ * behavioral reference and is no longer invoked by the application.</p>
  *
- * <p>This service is intentionally <strong>stateless</strong> (its only fields are the two
- * injected, immutable repositories) so it can be safely shared as a singleton across
- * {@code OrderService}, {@code DiscountService}, and {@code VendorSelectionService}. It depends
- * only on repositories (never on other services), making it a leaf in the service dependency
- * graph and guaranteeing acyclic constructor wiring.</p>
+ * <p>LEAF + STATELESS: this service depends only on two repositories (no other services) and holds no
+ * mutable state, so it is safe to share as a Spring singleton across {@code OrderService},
+ * {@code DiscountService}, and {@code VendorSelectionService} (AAP §0.6.3). Keeping it stateless is a
+ * binding rule — do not add caches, counters, or any mutable fields.</p>
  */
 @Service
 public class PricingService {
 
+    // Immutable collaborators (replaces CDI @Inject field injection). The only fields permitted —
+    // both repositories, no services, no mutable state — preserving the stateless-singleton contract.
     private final ProductRepository productRepository;
     private final VendorInventoryRepository vendorInventoryRepository;
 
     /**
-     * Constructor injection replaces the former CDI {@code @Inject EntityManager} field
-     * injection, yielding immutable collaborators and trivially testable construction.
+     * Single constructor → Spring performs constructor injection automatically (no {@code @Autowired}
+     * annotation required). Replaces the former CDI {@code @Inject EntityManager} field injection.
+     *
+     * @param productRepository          repository providing the product's {@code base_price}
+     * @param vendorInventoryRepository  repository providing the vendor's {@code markup_percent}
      */
     public PricingService(ProductRepository productRepository,
                           VendorInventoryRepository vendorInventoryRepository) {
@@ -44,78 +50,77 @@ public class PricingService {
     /**
      * Calculates the unit price for a product from a specific vendor at a given quantity.
      *
-     * <p>Re-implements {@code calculate_price}:
-     * {@code base_price * (1 + markup_percent/100) * (1 - volume_discount)} rounded to 4
-     * decimal places (HALF_UP), matching the stored procedure's {@code ROUND(..., 4)} and the
-     * {@code products.base_price NUMERIC(12,4)} column scale. Volume-discount tiers:
-     * qty&ge;100 -&gt; 15%, &ge;50 -&gt; 10%, &ge;20 -&gt; 5%, &ge;10 -&gt; 2%, otherwise 0%.</p>
+     * <p>Re-implementation of the {@code calculate_price(product_id, vendor_id, quantity)} stored
+     * procedure: load {@code base_price} (from {@link Product}) and {@code markup_percent} (from
+     * {@link VendorInventory}); a missing product or a missing vendor+product inventory combination
+     * surfaces as {@link InventoryNotFoundException} — the Java equivalent of the SQL
+     * {@code RAISE EXCEPTION ... USING ERRCODE = 'P0001'}.</p>
+     *
+     * <p>Formula (mirrors the SQL {@code ROUND(base * (1 + markup/100) * (1 - volume_discount), 4)}):
+     * the unit price is rounded to scale 4 with HALF_UP, matching {@code order_items.unit_price
+     * NUMERIC(12,4)}. {@code markup / 100} is expressed as {@code multiply(new BigDecimal("0.01"))}
+     * to avoid any non-terminating-division risk while remaining exact for the schema's scales.</p>
      *
      * @param productId  the product ID
      * @param vendorId   the vendor ID
-     * @param quantity   the order quantity (affects the volume-discount tier)
-     * @return           the unit price as a BigDecimal (scale 4)
-     * @throws InventoryNotFoundException if no inventory row exists for the product/vendor
-     *         combination (the Java equivalent of the stored procedure's {@code RAISE
-     *         EXCEPTION ... ERRCODE = 'P0001'})
+     * @param quantity   the order quantity (selects the volume-discount tier)
+     * @return           the unit price as a {@link BigDecimal} (scale 4, HALF_UP)
+     * @throws InventoryNotFoundException if the product, or the vendor+product inventory row, is absent
      */
     public BigDecimal calculatePrice(Long productId, Long vendorId, int quantity) {
+        // Load base_price (Product) — missing product => P0001-equivalent not-found.
         Product product = productRepository.findById(productId)
             .orElseThrow(() -> new InventoryNotFoundException(
-                "No vendor inventory found for product " + productId + " vendor " + vendorId));
+                "No product found: " + productId));
 
+        // Load markup_percent (VendorInventory) for the (vendor, product) composite key. The
+        // VendorInventoryId constructor order is (vendorId, productId) — verified in the model.
         VendorInventory inventory = vendorInventoryRepository
             .findById(new VendorInventoryId(vendorId, productId))
             .orElseThrow(() -> new InventoryNotFoundException(
                 "No vendor inventory found for product " + productId + " vendor " + vendorId));
 
-        BigDecimal basePrice = product.getBasePrice();
-        BigDecimal markupPercent = inventory.getMarkupPercent();
-        if (markupPercent == null) {
-            markupPercent = BigDecimal.ZERO;
+        BigDecimal basePrice = product.getBasePrice();           // base_price  NUMERIC(12,4)
+        BigDecimal markupPercent = inventory.getMarkupPercent(); // markup_percent NUMERIC(6,2)
+
+        // Volume-discount tiers (exact decimals), mirroring the SQL IF/ELSIF ladder:
+        // qty >= 100 -> 0.15, >= 50 -> 0.10, >= 20 -> 0.05, >= 10 -> 0.02, otherwise 0.
+        BigDecimal volumeDiscount;
+        if (quantity >= 100) {
+            volumeDiscount = new BigDecimal("0.15");
+        } else if (quantity >= 50) {
+            volumeDiscount = new BigDecimal("0.10");
+        } else if (quantity >= 20) {
+            volumeDiscount = new BigDecimal("0.05");
+        } else if (quantity >= 10) {
+            volumeDiscount = new BigDecimal("0.02");
+        } else {
+            volumeDiscount = BigDecimal.ZERO;
         }
 
-        BigDecimal volumeDiscount = volumeDiscountFor(quantity);
-
-        // base_price * (1 + markup_percent/100.0) * (1 - volume_discount)
-        BigDecimal markupFactor = BigDecimal.ONE.add(
-            markupPercent.divide(BigDecimal.valueOf(100), 12, RoundingMode.HALF_UP));
+        // unit = base * (1 + markup/100) * (1 - volumeDiscount), ROUND(..., 4).
+        BigDecimal markupFactor = BigDecimal.ONE.add(markupPercent.multiply(new BigDecimal("0.01")));
         BigDecimal volumeFactor = BigDecimal.ONE.subtract(volumeDiscount);
-
-        return basePrice.multiply(markupFactor)
-            .multiply(volumeFactor)
+        return basePrice.multiply(markupFactor).multiply(volumeFactor)
             .setScale(4, RoundingMode.HALF_UP);
     }
 
     /**
-     * Maps an order quantity to its volume-discount fraction, mirroring the stored procedure's
-     * tiered {@code IF ... ELSIF} ladder exactly.
+     * Calculates the line total for a product from a specific vendor at a given quantity
+     * (unit price × quantity).
      *
-     * @param quantity the order quantity
-     * @return the volume-discount fraction (0.00, 0.02, 0.05, 0.10, or 0.15)
-     */
-    private BigDecimal volumeDiscountFor(int quantity) {
-        if (quantity >= 100) {
-            return new BigDecimal("0.15");
-        } else if (quantity >= 50) {
-            return new BigDecimal("0.10");
-        } else if (quantity >= 20) {
-            return new BigDecimal("0.05");
-        } else if (quantity >= 10) {
-            return new BigDecimal("0.02");
-        }
-        return BigDecimal.ZERO;
-    }
-
-    /**
-     * Calculates the total price for a line item (unit price * quantity).
+     * <p>{@code order_items.line_total} is {@code NUMERIC(12,2)}, so the result is rounded to scale 2
+     * with HALF_UP, mirroring the SQL {@code ROUND(unit_price * quantity, 2)}.</p>
      *
      * @param productId  the product ID
      * @param vendorId   the vendor ID
      * @param quantity   the order quantity
-     * @return           the line total as BigDecimal
+     * @return           the line total as a {@link BigDecimal} (scale 2, HALF_UP)
+     * @throws InventoryNotFoundException if the product, or the vendor+product inventory row, is absent
      */
     public BigDecimal calculateLineTotal(Long productId, Long vendorId, int quantity) {
-        BigDecimal unitPrice = calculatePrice(productId, vendorId, quantity);
-        return unitPrice.multiply(BigDecimal.valueOf(quantity));
+        return calculatePrice(productId, vendorId, quantity)
+            .multiply(BigDecimal.valueOf(quantity))
+            .setScale(2, RoundingMode.HALF_UP);
     }
 }

@@ -2,91 +2,129 @@ package org.jboss.as.quickstarts.kitchensink.rest;
 
 import java.util.HashMap;
 import java.util.Map;
+
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.jboss.as.quickstarts.kitchensink.service.EmptyCartException;
+
 import org.jboss.as.quickstarts.kitchensink.service.InventoryNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.service.MemberNotFoundException;
+import org.jboss.as.quickstarts.kitchensink.service.EmptyCartException;
 
 /**
- * Centralized REST exception handling, replacing the inline JAX-RS {@code Response}/
- * {@code WebApplicationException} construction that the legacy resources performed.
+ * Centralizes the HTTP error-response contracts that were previously built inline in
+ * {@code MemberResourceRESTService} (and the other JAX-RS resources) using
+ * jakarta.ws.rs Response/WebApplicationException. Migrated to Spring MVC as a global
+ * {@code @RestControllerAdvice}.
  *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): the legacy
- * {@code MemberResourceRESTService} built error responses inline — a 400 field-error map from bean
- * validation, a 409 for duplicate email, and a 404 for missing members. That cross-cutting concern is
- * consolidated here as a {@code @RestControllerAdvice} so every controller shares one consistent HTTP
- * error contract. The duplicate-email 409 remains inline in {@code MemberResourceRESTService} (there
- * is no dedicated duplicate-email exception type to map here).</p>
- *
- * <p>Status mapping (preserving the legacy contract and AAP requirements):</p>
+ * <p>The status codes and JSON body shapes produced here must match the pre-migration
+ * contract exactly, because the PHP storefront and the integration tests depend on them:
  * <ul>
- *   <li>{@link MethodArgumentNotValidException} (from {@code @Valid}) &rarr; 400 with a
- *       field-name&rarr;message map, mirroring the legacy {@code ConstraintViolationException} handling.</li>
- *   <li>{@link MemberNotFoundException} (≙ stored-proc {@code P0002}/{@code P0003}) &rarr; 404.</li>
- *   <li>{@link InventoryNotFoundException} (≙ stored-proc {@code P0001}) &rarr; 404.</li>
- *   <li>{@link EmptyCartException} (≙ stored-proc {@code P0004}) &rarr; 400.</li>
+ *   <li>{@link MethodArgumentNotValidException} &rarr; <strong>400</strong> with a
+ *       {@code {field : message}} map (the former {@code createViolationResponse}).</li>
+ *   <li>{@link DuplicateEmailException} &rarr; <strong>409</strong> with the exact body
+ *       {@code {"email":"Email taken"}} (the former {@code ValidationException} &rarr; CONFLICT).</li>
+ *   <li>{@link InventoryNotFoundException} / {@link MemberNotFoundException} &rarr;
+ *       <strong>404</strong> with the exception message (precise replacements for the
+ *       former generic failure paths).</li>
+ *   <li>{@link EmptyCartException} &rarr; <strong>400</strong> with the exception message.</li>
  * </ul>
+ *
+ * <p>Spring auto-discovers this advice via the {@code @SpringBootApplication} component scan
+ * (base package {@code org.jboss.as.quickstarts.kitchensink}); no manual registration is needed.
+ * No catch-all {@code Exception} handler is declared on purpose, so unmapped errors continue to
+ * surface as Spring's default 500 rather than being masked.
  */
 @RestControllerAdvice
 public class RestExceptionHandler {
 
     /**
-     * Maps bean-validation failures to a 400 response whose body is a map of field name to violation
-     * message — the exact shape the legacy resource produced from {@code ConstraintViolation}s.
+     * Handles bean-validation failures raised when a {@code @Valid @RequestBody Member} payload
+     * violates its constraints. Reproduces the former {@code createViolationResponse} shape: a
+     * map whose keys are the offending property names (e.g. {@code name}, {@code email},
+     * {@code phoneNumber}) and whose values are the corresponding constraint messages.
      *
-     * @param ex the validation exception raised by {@code @Valid}
-     * @return 400 with a field-to-message map
+     * @param ex the validation exception carrying the binding result with field errors
+     * @return {@code 400 BAD_REQUEST} with a {@code Map<String,String>} of field-to-message entries
      */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, String>> handleValidation(MethodArgumentNotValidException ex) {
         Map<String, String> errors = new HashMap<>();
-        for (FieldError fieldError : ex.getBindingResult().getFieldErrors()) {
-            errors.put(fieldError.getField(), fieldError.getDefaultMessage());
-        }
+        ex.getBindingResult().getFieldErrors()
+            .forEach(error -> errors.put(error.getField(), error.getDefaultMessage()));
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errors);
     }
 
     /**
-     * Maps member-not-found to 404, replacing the legacy {@code WebApplicationException(NOT_FOUND)}.
+     * Handles the duplicate-email condition thrown by {@code MemberResourceRESTService.createMember}
+     * when a member with the same email already exists. Reproduces the former
+     * {@code ValidationException} &rarr; CONFLICT contract exactly.
      *
-     * @param ex the member-not-found exception
-     * @return 404 with an {@code error} message
+     * @param ex the duplicate-email exception (only its type is significant here)
+     * @return {@code 409 CONFLICT} with the exact body {@code {"email":"Email taken"}}
      */
-    @ExceptionHandler(MemberNotFoundException.class)
-    public ResponseEntity<Map<String, String>> handleMemberNotFound(MemberNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(errorBody(ex.getMessage()));
+    @ExceptionHandler(DuplicateEmailException.class)
+    public ResponseEntity<Map<String, String>> handleDuplicateEmail(DuplicateEmailException ex) {
+        Map<String, String> body = new HashMap<>();
+        body.put("email", "Email taken");
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     /**
-     * Maps inventory-not-found (a vendor not stocking a product) to 404.
+     * Handles the absence of a product / vendor-inventory combination during price calculation.
+     * Replaces the {@code P0001} {@code RAISE EXCEPTION} formerly surfaced by the
+     * {@code calculate_price} stored procedure (and the JAX-RS getPrice 404 path).
      *
      * @param ex the inventory-not-found exception
-     * @return 404 with an {@code error} message
+     * @return {@code 404 NOT_FOUND} with the exception message as a plain string body
      */
     @ExceptionHandler(InventoryNotFoundException.class)
-    public ResponseEntity<Map<String, String>> handleInventoryNotFound(InventoryNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(errorBody(ex.getMessage()));
+    public ResponseEntity<String> handleInventoryNotFound(InventoryNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
     }
 
     /**
-     * Maps an empty-cart order submission to 400.
+     * Handles a reference to a member that does not exist. Replaces the {@code P0002}/{@code P0003}
+     * {@code RAISE EXCEPTION} conditions formerly surfaced by the {@code apply_customer_discount}
+     * and {@code process_order} stored procedures.
      *
-     * @param ex the empty-cart exception
-     * @return 400 with an {@code error} message
+     * @param ex the member-not-found exception
+     * @return {@code 404 NOT_FOUND} with the exception message as a plain string body
      */
-    @ExceptionHandler(EmptyCartException.class)
-    public ResponseEntity<Map<String, String>> handleEmptyCart(EmptyCartException ex) {
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorBody(ex.getMessage()));
+    @ExceptionHandler(MemberNotFoundException.class)
+    public ResponseEntity<String> handleMemberNotFound(MemberNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
     }
 
-    private Map<String, String> errorBody(String message) {
-        Map<String, String> body = new HashMap<>();
-        body.put("error", message);
-        return body;
+    /**
+     * Handles an order preview/submit attempted against an empty draft cart. Replaces the
+     * {@code P0004} {@code RAISE EXCEPTION} formerly surfaced by the {@code process_order} stored
+     * procedure. An empty cart is treated as a client request error (400) rather than a missing
+     * resource (404).
+     *
+     * @param ex the empty-cart exception
+     * @return {@code 400 BAD_REQUEST} with the exception message as a plain string body
+     */
+    @ExceptionHandler(EmptyCartException.class)
+    public ResponseEntity<String> handleEmptyCart(EmptyCartException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ex.getMessage());
+    }
+
+    /**
+     * Thrown by MemberResourceRESTService.createMember when a member with the same email
+     * already exists. Mapped to HTTP 409 with body {"email":"Email taken"}.
+     *
+     * <p>It lives here as a nested {@code public static} type (rather than a separate top-level
+     * file) so that the 409 contract stays co-located with the advice that enforces it, and so the
+     * controller in this same package can reference it as
+     * {@code RestExceptionHandler.DuplicateEmailException} without an import.
+     */
+    public static class DuplicateEmailException extends RuntimeException {
+
+        public DuplicateEmailException() {
+            super("Email taken");
+        }
     }
 }

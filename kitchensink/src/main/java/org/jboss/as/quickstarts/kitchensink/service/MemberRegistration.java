@@ -20,23 +20,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import org.jboss.as.quickstarts.kitchensink.data.MemberRepository;
 import org.jboss.as.quickstarts.kitchensink.model.Member;
 
 /**
- * MemberRegistration — persists a new {@link Member}.
+ * MemberRegistration — registers a new member.
  *
- * <p>MIGRATION (JBoss EAP 8 / Jakarta EE 10 -&gt; Spring Boot 3.x): formerly an EJB
- * {@code @Stateless} bean that injected an {@code EntityManager} and a JUL {@code Logger}, persisted
- * via {@code em.persist(member)}, and fired a CDI {@code Event<Member>}. It is now a Spring
- * {@code @Service} with declarative {@code @Transactional} demarcation (replacing the EJB's implicit
- * container-managed transaction), a private SLF4J logger (replacing the CDI-injected JUL logger),
- * and persistence through the Spring Data {@link MemberRepository}.</p>
- *
- * <p>The CDI {@code Event<Member>} fire is removed: its sole observer was the JSF
- * {@code MemberListProducer}, which is retired as part of the JSF/CDI plumbing removal. There is no
- * in-scope Spring equivalent and no remaining listener, so the event is dropped per the migration's
- * minimal-change directive.</p>
+ * Migrated from EJB @Stateless to Spring @Service. The container-managed transaction that @Stateless
+ * provided is replaced by Spring's @Transactional. EntityManager.persist(member) becomes
+ * memberRepository.save(member); the CDI-injected java.util.logging.Logger becomes an SLF4J logger.
+ * The CDI Event<Member> firing is removed because its sole observer (MemberListProducer) is deleted in this migration.
  */
 @Service
 public class MemberRegistration {
@@ -49,15 +43,9 @@ public class MemberRegistration {
         this.memberRepository = memberRepository;
     }
 
-    /**
-     * Registers (persists) a new member. After this call returns, the member's generated identifier
-     * is populated on the supplied instance.
-     *
-     * @param member the member to register
-     */
     @Transactional
     public void register(Member member) {
-        log.info("Registering {}", member.getName());
+        log.info("Registering " + member.getName());
         memberRepository.save(member);
     }
 }
