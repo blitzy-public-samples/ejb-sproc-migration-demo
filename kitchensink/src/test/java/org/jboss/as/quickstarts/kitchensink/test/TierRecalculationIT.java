@@ -124,4 +124,26 @@ public class TierRecalculationIT {
         assertEquals("BRONZE", updated.getTier(),
             "GOLD member with all orders > 91 days old should drop to BRONZE (no qualifying 90-day spend)");
     }
+
+    /**
+     * Test 5: the application-readiness lifecycle hook ({@code @EventListener(ApplicationReadyEvent)},
+     * the Spring replacement for the legacy EJB {@code @Startup}) must perform a real tier
+     * recalculation — not merely log readiness. A member carrying a stale GOLD tier but with no
+     * qualifying 90-day CONFIRMED spend must be corrected to BRONZE when the readiness handler runs.
+     *
+     * <p>This invokes {@link TierRecalculationService#onApplicationReady()} directly (the same method
+     * Spring invokes when {@code ApplicationReadyEvent} is published at startup) and asserts the tier
+     * is recomputed, guarding against a regression to a no-op startup handler.</p>
+     */
+    @Test
+    public void testApplicationReadyEventRecalculatesTiers() {
+        Member member = createTestMember("GOLD", new BigDecimal("3000.00"));
+
+        tierRecalculationService.onApplicationReady();
+
+        Member updated = memberRepository.findById(member.getId()).orElseThrow();
+        assertEquals("BRONZE", updated.getTier(),
+            "ApplicationReadyEvent handler must recalculate tiers: a member with no qualifying 90-day "
+                + "CONFIRMED spend drops to BRONZE at application readiness");
+    }
 }

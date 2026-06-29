@@ -3,6 +3,7 @@ package org.jboss.as.quickstarts.kitchensink.rest;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -30,6 +31,8 @@ import org.jboss.as.quickstarts.kitchensink.service.EmptyCartException;
  *       <strong>404</strong> with the exception message (precise replacements for the
  *       former generic failure paths).</li>
  *   <li>{@link EmptyCartException} &rarr; <strong>400</strong> with the exception message.</li>
+ *   <li>{@link OptimisticLockingFailureException} &rarr; <strong>409</strong> with a short retry
+ *       message (a concurrent-modification conflict, e.g. a double-submit of the same cart).</li>
  * </ul>
  *
  * <p>Spring auto-discovers this advice via the {@code @SpringBootApplication} component scan
@@ -110,6 +113,29 @@ public class RestExceptionHandler {
     @ExceptionHandler(EmptyCartException.class)
     public ResponseEntity<String> handleEmptyCart(EmptyCartException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ex.getMessage());
+    }
+
+    /**
+     * Handles a concurrent-modification conflict surfaced as an optimistic-locking failure. This arises
+     * on a double-submit of the same draft cart: the winning {@code submitOrder} transaction persists
+     * the order and clears the draft rows, so the losing transaction's draft removal targets a row that
+     * has already been deleted, and Hibernate raises a {@code StaleObjectStateException} that Spring
+     * wraps as an {@link OptimisticLockingFailureException} (the {@code OrderDraftItem} entity carries no
+     * {@code @Version}; the stale state is detected from the zero-row delete).
+     *
+     * <p>Without this mapping the failure escaped as an opaque {@code 500}. Mapping it to {@code 409}
+     * turns a plausible double-click into a controlled, retryable client error. The database stays
+     * consistent regardless: the losing transaction rolls back, so at most one order is created. The
+     * message is intentionally generic and no stack trace is logged here (consistent with the other
+     * handlers), so no internal detail leaks to the client.
+     *
+     * @param ex the optimistic-locking failure (only its type is significant here)
+     * @return {@code 409 CONFLICT} with a short, retry-oriented message
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<String> handleOptimisticLockingFailure(OptimisticLockingFailureException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+            .body("The cart was modified by a concurrent request; the order was not completed. Please retry.");
     }
 
     /**

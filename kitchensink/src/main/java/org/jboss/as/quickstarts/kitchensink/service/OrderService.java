@@ -164,6 +164,18 @@ public class OrderService {
      */
     @Transactional
     public Long submitOrder(Long memberId, String destinationZip, boolean expedite) {
+        // CONCURRENCY (QA Issue 4 — "at most one order should be created"): take a PESSIMISTIC_WRITE lock
+        // on this member's draft rows BEFORE computing/persisting the order. OrderDraftItem is unversioned,
+        // so without this two concurrent submits of the same cart could both read the drafts and each
+        // persist an order (a double-order), or race on the post-commit draft delete and surface a raw
+        // StaleObjectStateException as HTTP 500. With the lock, concurrent submits serialize: the first
+        // submit holds the lock until it commits (after deleting the drafts); the second blocks here, then
+        // under READ COMMITTED re-reads an empty cart and is rejected by orchestrateOrder with a controlled
+        // EmptyCartException -> 400. This is invoked only on the submit path; previewOrder stays lock-free.
+        // The OptimisticLockingFailureException -> 409 mapping in RestExceptionHandler remains as a
+        // defense-in-depth safety net. (See OrderDraftItemRepository.lockDraftsByMemberId.)
+        orderDraftItemRepository.lockDraftsByMemberId(memberId);
+
         OrderPreview computed = orchestrateOrder(memberId, destinationZip, expedite);
 
         // Persist the CONFIRMED order.

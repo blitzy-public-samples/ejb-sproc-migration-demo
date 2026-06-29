@@ -84,17 +84,32 @@ public class TierRecalculationService {
     /**
      * Application-readiness hook replacing the legacy EJB {@code @Startup}.
      *
-     * <p>The legacy {@code @Singleton @Startup} bean was only eagerly instantiated at deployment and
-     * performed NO recalculation on boot (it declared no {@code @PostConstruct} work); tier
-     * recalculation ran solely on the nightly {@code @Schedule(hour="2")} timer. To preserve that
-     * observable behavior, this method performs no recalculation at startup and only logs readiness.
-     * Recalculation runs on the nightly {@link #runNightlyTierRecalculation()} schedule or via the
-     * explicit {@link #triggerRecalculation()} entry point.</p>
+     * <p>The AAP maps the EJB {@code @Singleton @Startup} lifecycle to Spring's
+     * {@code @EventListener(ApplicationReadyEvent.class)} (§0.1.2, §0.3.2). This handler runs the tier
+     * recalculation exactly once, immediately after the application context is fully initialized — by
+     * the time {@link ApplicationReadyEvent} is published the datasource, the JPA layer, and any SQL
+     * data-initialization have all completed — so loyalty tiers reflect the current 90-day CONFIRMED
+     * spend as soon as the service is ready to receive traffic, rather than waiting for the first
+     * nightly {@link #runNightlyTierRecalculation()} run at 02:00.</p>
+     *
+     * <p>It delegates to the same {@link #recalculateAll()} implementation used by the scheduled and
+     * manual entry points, so the extracted {@code recalculate_customer_tiers} logic is identical
+     * across all three triggers — only the invocation timing is extended to application startup, which
+     * is precisely what the {@code @EventListener(ApplicationReadyEvent)} component is intended to
+     * provide.</p>
+     *
+     * <p>{@code @Transactional} is required here because the readiness event is published outside any
+     * ambient transaction; it establishes the transaction that {@link #recalculateAll()} relies on for
+     * its batched read/update. The event adapter invokes this method through the Spring proxy, so the
+     * transactional advice is applied (this is not a self-invocation).</p>
      */
     @EventListener(ApplicationReadyEvent.class)
+    @Transactional
     public void onApplicationReady() {
-        log.info("TierRecalculationService: application ready; nightly tier recalculation scheduled for "
-                + "02:00 (no recalculation performed at startup)");
+        log.info("TierRecalculationService: application ready; running startup tier recalculation");
+        recalculateAll();
+        log.info("TierRecalculationService: startup tier recalculation complete "
+                + "(nightly recalculation remains scheduled for 02:00)");
     }
 
     /**

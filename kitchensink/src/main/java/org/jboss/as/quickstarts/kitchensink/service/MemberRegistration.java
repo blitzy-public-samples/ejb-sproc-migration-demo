@@ -45,7 +45,12 @@ public class MemberRegistration {
 
     @Transactional
     public void register(Member member) {
-        log.info("Registering {}", member.getName());
+        // Persist first so the database-generated identity is available for logging.
         memberRepository.save(member);
+        // Log hygiene / information-exposure (CWE-532): do NOT log the raw, user-supplied member name.
+        // It is free-form PII and an attacker-controllable value (e.g. markup/injection-style payloads);
+        // emitting it verbatim pollutes logs and risks log-forging. Log only the non-sensitive,
+        // server-generated id, which is sufficient to trace the registration.
+        log.info("Registered new member (id={})", member.getId());
     }
 }
