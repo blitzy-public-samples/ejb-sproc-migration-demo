@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        users-service — Spring Boot 3.x microservice (bounded context: member registration
+        and loyalty-tier management). Port 8083, context-path /users.
+
+        One of three sibling services produced by decomposing the legacy kitchensink JBoss EAP
+        monolith. The Maven parent is the Spring Boot starter parent (NOT the kitchensink aggregator):
+        spring-boot-starter-parent is the single hand-pinned version string in this module; every
+        other coordinate inherits its version from the parent's managed BOM (spring-boot-dependencies),
+        which also imports the Testcontainers BOM. Version 3.5.16 is the latest Spring Boot 3.5.x
+        patch and requires Java 17.
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/> <!-- look up parent from repository -->
+    </parent>
+
+    <groupId>org.jboss.as.quickstarts.kitchensink</groupId>
+    <artifactId>users-service</artifactId>
+    <version>8.0.0.GA</version>
+    <packaging>jar</packaging>
+
+    <name>kitchensink :: users-service</name>
+    <description>Member registration and loyalty-tier management microservice (Spring Boot 3.x)</description>
+
+    <properties>
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <!--
+        Cross-domain boundary rule (critical): this module declares NO compile-scope dependency on
+        any sibling service module (the marketplace and orders domains). All cross-service interaction
+        is HTTP-only at runtime, mediated by thin RestTemplate-based client components. Do not add any
+        <dependency> entry pointing at a sibling artifact.
+    -->
+    <dependencies>
+        <!-- REST controllers, Spring MVC, embedded Tomcat, RestTemplate -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <!-- Spring Data JPA + Hibernate ORM (repositories, ddl-auto=validate) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <!-- Bean Validation (Hibernate Validator) — retains the Member entity jakarta.validation constraints -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <!-- Operational endpoints: /actuator/health, info, metrics -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!-- PostgreSQL JDBC driver (version managed by the Spring Boot BOM; supersedes the legacy pinned driver coordinate) -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- JUnit 5, AssertJ, Spring Test, MockMvc, MockRestServiceServer (stubs the Contract 3 spend endpoint in TierRecalculationIT) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Disposable PostgreSQL for integration tests (version managed via the Testcontainers BOM imported by spring-boot-dependencies) -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers <-> JUnit 5 integration -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Repackages the module into an executable fat JAR (java -jar). Version managed by the parent. -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

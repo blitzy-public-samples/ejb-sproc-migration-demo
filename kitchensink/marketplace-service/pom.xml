@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    marketplace-service — Spring Boot 3.x child module.
+
+    One of three independently deployable Spring Boot services that together replace
+    the legacy `kitchensink` monolith. This module owns the product-catalog, pricing,
+    and vendor-selection bounded context.
+
+      * Runtime identity: server.port=8081, server.servlet.context-path=/marketplace
+      * Role: PURE PRODUCER — it exposes REST endpoints but makes no outbound
+        cross-service HTTP calls, so it carries no HTTP client components.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Spring Boot parent BOM + plugin management. This is the ONLY hand-pinned
+        version in the whole project; every other coordinate inherits its version
+        from this parent's managed dependencies.
+
+        Version 3.5.16 is the concrete latest Spring Boot 3.5.x patch pinned for this
+        build (AAP §0.5.1: "the latest 3.x patch at build time"). It is the version
+        provisioned in the local Maven repository for reproducible, offline-capable
+        builds, is the final 3.x feature generation, and requires Java 17 — matching
+        the target runtime.
+
+        The empty <relativePath/> is REQUIRED so Maven resolves spring-boot-starter-parent
+        from the repository instead of treating the sibling `../pom.xml` (the kitchensink
+        aggregator) as this module's parent.
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>org.jboss.as.quickstarts.kitchensink</groupId>
+    <artifactId>marketplace-service</artifactId>
+    <version>8.0.0.GA</version>
+    <!-- No <packaging> element: defaults to `jar`, repackaged into an executable Spring Boot fat JAR. -->
+    <name>marketplace-service</name>
+    <description>Marketplace service: product catalog, pricing, and vendor selection (Spring Boot).</description>
+
+    <properties>
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <!--
+        marketplace-service is a pure producer: it declares NO compile-scope dependency
+        on any sibling service module; all cross-service interaction is HTTP-only. Every
+        coordinate below has its version managed by the Spring Boot parent BOM, so none
+        declares an explicit <version>.
+    -->
+    <dependencies>
+        <!-- REST controllers, Spring MVC, embedded Tomcat (and RestTemplate support). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Spring Data JPA + Hibernate ORM (replaces the legacy EntityManager-based data access). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!-- Bean Validation provider — retains the entity constraints (e.g. @NotNull / @Size). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- Actuator: exposes /actuator/health, info, and metrics. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- PostgreSQL JDBC driver (runtime scope; version managed by the parent BOM). -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Test stack: JUnit 5, AssertJ, Spring Test, MockMvc, and MockRestServiceServer. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Testcontainers: disposable PostgreSQL for the PricingServiceIT integration test
+             (version via the Testcontainers BOM imported by spring-boot-dependencies). -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Testcontainers integration with the JUnit 5 platform. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Repackages the module into an executable fat JAR so
+                `java -jar marketplace-service/target/marketplace-service-*.jar` works and
+                the container runtime stage can run `java -jar app.jar`.
+                Version is managed by the Spring Boot parent.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
