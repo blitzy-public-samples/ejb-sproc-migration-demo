@@ -3,6 +3,7 @@ package org.jboss.as.quickstarts.kitchensink.users.client;
 import org.jboss.as.quickstarts.kitchensink.users.dto.MemberSpendDto;
 import org.jboss.as.quickstarts.kitchensink.users.exception.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
@@ -10,6 +11,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 
 /**
  * Default {@link OrdersClient} implementation &mdash; the thin HTTP gateway that
@@ -35,6 +37,21 @@ public class OrdersClientImpl implements OrdersClient {
      */
     private static final int TIER_WINDOW_DAYS = 90;
 
+    /**
+     * Connect timeout for outbound orders-service calls. Caps how long the client waits to establish
+     * the TCP connection so that a down or unreachable orders-service fails fast instead of hanging
+     * the nightly tier-recalculation scheduler thread (and any request thread) that invokes this
+     * gateway (resilience/security hardening, AAP &sect;0.6.5).
+     */
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(2);
+
+    /**
+     * Read (socket) timeout for outbound orders-service calls. Bounds how long the client waits for
+     * the spend response once the request is sent, preventing a slow orders-service from blocking the
+     * per-member tier-recalculation fan-out (AAP &sect;0.6.5) and exhausting scheduler/request threads.
+     */
+    private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
+
     private final RestClient restClient;
 
     /**
@@ -43,7 +60,16 @@ public class OrdersClientImpl implements OrdersClient {
      *                      (property {@code orders.base-url}).
      */
     public OrdersClientImpl(@Value("${orders.base-url}") String ordersBaseUrl) {
-        this.restClient = RestClient.builder().baseUrl(ordersBaseUrl).build();
+        // Configure explicit connect/read timeouts on the underlying request factory so a slow or
+        // unreachable orders-service fails fast rather than hanging the tier-recalculation scheduler
+        // threads and exhausting resources. No retry/cache/circuit-breaker is added (minimal-change).
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(CONNECT_TIMEOUT);
+        requestFactory.setReadTimeout(READ_TIMEOUT);
+        this.restClient = RestClient.builder()
+                .baseUrl(ordersBaseUrl)
+                .requestFactory(requestFactory)
+                .build();
     }
 
     @Override

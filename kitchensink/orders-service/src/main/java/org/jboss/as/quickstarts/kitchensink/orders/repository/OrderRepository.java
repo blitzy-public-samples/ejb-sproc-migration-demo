@@ -14,7 +14,7 @@ import org.springframework.data.repository.query.Param;
  *
  * <p>Replaces the monolith's hand-rolled {@code @ApplicationScoped} {@code EntityManager}/JPQL
  * repository. CRUD (including {@code findById} and {@code save}) is inherited from
- * {@link JpaRepository}; only the two domain-specific finders below are declared.</p>
+ * {@link JpaRepository}; only the domain-specific finders below are declared.</p>
  */
 public interface OrderRepository extends JpaRepository<Order, Long> {
 
@@ -26,6 +26,19 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
      * as a Spring Data derived query. Consumed by {@code OrderService.getOrderHistory}.</p>
      */
     List<Order> findByMemberIdOrderByCreatedAtDesc(Long memberId);
+
+    /**
+     * All orders placed by a member (the basic, unordered member-order finder).
+     *
+     * <p>Restores the unqualified {@code findByMemberId(Long)} finder that the monolith's
+     * {@code data/OrderRepository} exposed and that AAP &sect;0.4.1 enumerates for this repository
+     * ("{@code OrderRepository.java} &rarr; {@code JpaRepository}; {@code findByMemberId}, items
+     * query"). Declared as a Spring Data derived query that generates
+     * {@code WHERE o.memberId = ?1} (no ordering). Callers that need newest-first ordering use the
+     * sibling {@link #findByMemberIdOrderByCreatedAtDesc(Long)} instead; this method is the simple
+     * member-scoped lookup relied on by later orders-service code.</p>
+     */
+    List<Order> findByMemberId(Long memberId);
 
     /**
      * Contract 3 (Spend): the SUM of a member's {@code CONFIRMED} order totals on/after a cutoff.

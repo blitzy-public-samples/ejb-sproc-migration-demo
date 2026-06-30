@@ -2,11 +2,13 @@ package org.jboss.as.quickstarts.kitchensink.orders.client;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.List;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
@@ -22,10 +24,35 @@ import org.springframework.web.client.RestClientException;
 @Component
 public class MarketplaceClientImpl implements MarketplaceClient {
 
+    /**
+     * Connect timeout for outbound marketplace-service calls. Caps how long the client waits to
+     * establish the TCP connection so that a down or unreachable marketplace-service fails fast
+     * instead of hanging an orders-service request thread (resilience/security hardening, AAP
+     * &sect;0.6.3).
+     */
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(2);
+
+    /**
+     * Read (socket) timeout for outbound marketplace-service calls. Bounds how long the client waits
+     * for the response once the request is sent, limiting the time an order preview/submit can be
+     * blocked by a slow marketplace-service &mdash; and, for the {@code @Transactional submitOrder}
+     * path, the time the database transaction stays open while awaiting pricing (AAP &sect;0.6.3).
+     */
+    private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
+
     private final RestClient restClient;
 
     public MarketplaceClientImpl(@Value("${marketplace.base-url}") String marketplaceBaseUrl) {
-        this.restClient = RestClient.builder().baseUrl(marketplaceBaseUrl).build();
+        // Configure explicit connect/read timeouts on the underlying request factory so a slow or
+        // unreachable marketplace-service fails fast rather than hanging order preview/submit paths
+        // and exhausting request threads. No retry/cache/circuit-breaker is added (minimal-change).
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(CONNECT_TIMEOUT);
+        requestFactory.setReadTimeout(READ_TIMEOUT);
+        this.restClient = RestClient.builder()
+                .baseUrl(marketplaceBaseUrl)
+                .requestFactory(requestFactory)
+                .build();
     }
 
     @Override
