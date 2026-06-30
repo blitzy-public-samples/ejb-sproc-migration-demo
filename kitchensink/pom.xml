@@ -1,127 +1,57 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+    kitchensink — Maven multi-module PARENT AGGREGATOR POM.
+
+    This aggregator reactor-builds the three Spring Boot 3.x services produced by decomposing
+    the original `kitchensink` monolith strictly along business-domain lines:
+
+      * marketplace-service — product catalog, pricing, vendor selection (port 8081, /marketplace)
+      * orders-service      — shopping cart, order orchestration, discounting, shipping (port 8082, /orders)
+      * users-service       — member registration and loyalty-tier management (port 8083, /users)
+
+    Migration notes (minimal-change discipline): the legacy single-module build descriptor was
+    converted into a pure aggregator. The former inherited parent was dropped, so an explicit
+    <groupId> is declared below; packaging is now `pom` (an aggregator produces no artifact). The
+    legacy dependency, dependencyManagement, profile, and build-plugin blocks were all removed —
+    each child module manages its own dependencies through the Spring Boot starter parent.
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <parent>
-        <groupId>org.jboss.as.quickstarts</groupId>
-        <artifactId>jboss-eap-quickstart-parent</artifactId>
-        <version>6.0.0.redhat-00001</version>
-    </parent>
-
+    <!--
+        Coordinates preserved from the legacy module (artifactId=kitchensink, version=8.0.0.GA) so the
+        repository-root quickstart aggregator (NOT edited) keeps listing `kitchensink` as a module. The
+        <groupId> is declared explicitly because the former inherited parent (which previously supplied
+        it) has been removed.
+    -->
+    <groupId>org.jboss.as.quickstarts</groupId>
     <artifactId>kitchensink</artifactId>
     <version>8.0.0.GA</version>
-    <packaging>war</packaging>
+    <packaging>pom</packaging>
 
-    <name>JBoss EAP Quickstart: kitchensink (Net32 Augmentation)</name>
-    <description>Net32 dental supply augmentation of the kitchensink quickstart</description>
+    <name>JBoss EAP Quickstart: kitchensink (Spring Boot microservices aggregator)</name>
+    <description>Maven aggregator for the kitchensink Spring Boot 3.x microservices (marketplace, orders, users).</description>
 
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.jboss.bom</groupId>
-                <artifactId>jboss-eap-ee-with-tools</artifactId>
-                <version>8.0.0.GA-redhat-00009</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
+    <!--
+        Documentation-only properties for this aggregator. They impose no build behavior of their own
+        (an aggregator compiles nothing) but record the Java 17 baseline shared by every child module.
+    -->
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>17</maven.compiler.release>
+    </properties>
 
-    <dependencies>
-        <!-- Jakarta EE APIs (provided by EAP) -->
-        <dependency>
-            <groupId>jakarta.enterprise</groupId>
-            <artifactId>jakarta.enterprise.cdi-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.annotation</groupId>
-            <artifactId>jakarta.annotation-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.ws.rs</groupId>
-            <artifactId>jakarta.ws.rs-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.persistence</groupId>
-            <artifactId>jakarta.persistence-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.validation</groupId>
-            <artifactId>jakarta.validation-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.ejb</groupId>
-            <artifactId>jakarta.ejb-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.hibernate.validator</groupId>
-            <artifactId>hibernate-validator</artifactId>
-            <scope>provided</scope>
-        </dependency>
-
-        <!-- Test dependencies -->
-        <dependency>
-            <groupId>org.jboss.arquillian.junit</groupId>
-            <artifactId>arquillian-junit-container</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <!-- Net32 augmentation: added PostgreSQL driver -->
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <version>42.7.3</version>
-            <scope>provided</scope>
-        </dependency>
-    </dependencies>
-
-    <profiles>
-        <profile>
-            <id>arq-remote</id>
-            <dependencies>
-                <dependency>
-                    <groupId>org.wildfly.arquillian</groupId>
-                    <artifactId>wildfly-arquillian-container-remote</artifactId>
-                    <scope>test</scope>
-                </dependency>
-            </dependencies>
-        </profile>
-        <profile>
-            <id>openshift</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.eclipse.jkube</groupId>
-                        <artifactId>openshift-maven-plugin</artifactId>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
-
-    <build>
-        <finalName>${project.artifactId}</finalName>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-war-plugin</artifactId>
-                <configuration>
-                    <failOnMissingWebXml>false</failOnMissingWebXml>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
+    <!--
+        Pure aggregator: declares NO dependencies. Per the cross-domain boundary rule, the three
+        services have NO inter-service compile-scope dependencies; all cross-service interaction is
+        HTTP-only at runtime (mediated by thin RestTemplate-based client components inside each service).
+        Do NOT add any dependency, dependencyManagement, or build-plugin entry here.
+    -->
+    <modules>
+        <module>marketplace-service</module>
+        <module>orders-service</module>
+        <module>users-service</module>
+    </modules>
 </project>
