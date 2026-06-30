@@ -9,6 +9,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
 
+import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 
 /**
@@ -30,8 +31,7 @@ public class UsersClient {
 
     /**
      * Contract 2 - member loyalty tier. Body {"tier":"GOLD"} (BRONZE/SILVER/GOLD/PLATINUM).
-     * 404 -> rethrow Spring's HttpClientErrorException.NotFound (MemberNotFoundException is
-     * users-service-owned and intentionally NOT created here); 5xx -> ServiceUnavailableException.
+     * 404 -> MemberNotFoundException (orders-service's OWN local type); 5xx -> ServiceUnavailableException.
      */
     public String getMemberTier(Long memberId) {
         String url = usersBaseUrl + "/api/members/{memberId}/tier";
@@ -39,10 +39,13 @@ public class UsersClient {
             MemberTierDto dto = restTemplate.getForObject(url, MemberTierDto.class, memberId);
             return dto != null ? dto.tier() : null;
         } catch (HttpClientErrorException.NotFound e) {
-            // Cross-domain boundary rule (§0.6.6 / Contract 2): a 404 means the member does not
-            // exist. MemberNotFoundException belongs to users-service and is deliberately not
-            // duplicated here, so surface the not-found as Spring's typed runtime failure.
-            throw e;
+            // Contract Authority (§0.6.2, Contract 2): a 404 means the member does not exist;
+            // translate it into the orders-service-LOCAL MemberNotFoundException so downstream
+            // orders logic (e.g. DiscountService) receives a typed domain failure. The local
+            // exception keeps the cross-domain boundary intact - users-service's identically
+            // named type is never imported (§0.7.2 no-shared-classes rule).
+            throw new MemberNotFoundException(
+                    "Member not found in users-service for memberId=" + memberId, e);
         } catch (HttpServerErrorException e) {
             throw new ServiceUnavailableException(
                     "users-service unavailable while fetching tier for memberId=" + memberId, e);
