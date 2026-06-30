@@ -10,6 +10,7 @@ import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Valid;
 import jakarta.validation.ValidationException;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
@@ -168,6 +169,30 @@ public class MemberResourceRESTService {
      */
     @ExceptionHandler(ValidationException.class)
     public ResponseEntity<Map<String, String>> handleDuplicateEmail(ValidationException ex) {
+        Map<String, String> responseObj = new HashMap<>();
+        responseObj.put("email", "Email taken");
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(responseObj);
+    }
+
+    /**
+     * Concurrency-safe duplicate-email mapping -> 409 with body {@code {"email":"Email taken"}}.
+     *
+     * <p>The {@link #createMember} flow guards uniqueness with a check-then-insert
+     * ({@link #emailAlreadyExists} then {@link MemberRegistration#register}). That guard is correct
+     * for the common sequential case, but under near-simultaneous identical-email submissions
+     * multiple requests can pass the existence check before any insert commits. The database's
+     * {@code member_email_key} unique constraint still rejects the race-losers (data integrity is
+     * always preserved), and Spring surfaces that rejection as a
+     * {@link DataIntegrityViolationException}. Mapping it here preserves the AAP &sect;0.6.6
+     * "Duplicate email -&gt; 409" contract for the race-loser instead of leaking a generic 500.</p>
+     *
+     * <p>This is a TARGETED handler for a single expected exception (the duplicate-email race), not a
+     * catch-all {@code Exception} handler: any other unexpected error still yields Spring's default
+     * 500. The 409 body mirrors {@link #handleDuplicateEmail} so sequential and concurrent duplicates
+     * return an identical response.</p>
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<Map<String, String>> handleDataIntegrityViolation(DataIntegrityViolationException ex) {
         Map<String, String> responseObj = new HashMap<>();
         responseObj.put("email", "Email taken");
         return ResponseEntity.status(HttpStatus.CONFLICT).body(responseObj);
