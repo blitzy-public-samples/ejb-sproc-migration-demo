@@ -55,11 +55,17 @@ public class InternalOrderResourceIT {
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
 
+    /** Test-only value for the now-required (no-default) shared service token. */
+    private static final String TEST_INTERNAL_TOKEN = "test-internal-token";
+
     @DynamicPropertySource
     static void datasourceProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // security.internal.token has no default in application.properties (CWE-798 fix); the test
+        // supplies an explicit value here so the @Value injection and token guard work under test.
+        registry.add("security.internal.token", () -> TEST_INTERNAL_TOKEN);
     }
 
     @BeforeAll
@@ -74,7 +80,7 @@ public class InternalOrderResourceIT {
     @Autowired
     private MockMvc mockMvc;
 
-    /** The configured shared service token (default from application.properties in the test profile). */
+    /** The configured shared service token (supplied by {@link #datasourceProperties} under test). */
     @Value("${security.internal.token}")
     private String internalToken;
 

@@ -25,10 +25,11 @@ import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableE
 public class UsersClient {
 
     /**
-     * Header carrying the shared service-to-service token. The internal member-spend mutation
-     * endpoint on users-service is access-controlled (CRITICAL security finding); this client is a
-     * trusted internal caller and therefore presents the token on every spend increment. The public
-     * Contract-2 tier read stays open and sends no token.
+     * Header carrying the shared service-to-service token. Both the member-spend mutation endpoint and
+     * the member-tier read on users-service are now access-controlled (CRITICAL security findings):
+     * member-scoped reads require authentication and ownership, and a trusted peer service authenticates
+     * with this shared token to obtain cross-member (SERVICE) access. orders-service is such a trusted
+     * caller, so it presents the token on every users-service request (tier read and spend increment).
      */
     static final String INTERNAL_TOKEN_HEADER = "X-Internal-Service-Token";
 
@@ -47,11 +48,22 @@ public class UsersClient {
     /**
      * Contract 2 - member loyalty tier. Body {"tier":"GOLD"} (BRONZE/SILVER/GOLD/PLATINUM).
      * 404 -> MemberNotFoundException (orders-service's OWN local type); 5xx -> ServiceUnavailableException.
+     *
+     * <p>ACCESS CONTROL: the users-service tier endpoint is member-scoped and access-controlled; this
+     * client is a trusted peer service, so the request carries the shared service token
+     * ({@value #INTERNAL_TOKEN_HEADER}) to authenticate as a SERVICE caller (permitted to read any
+     * member's tier). The call is sent via {@code exchange} with an explicit header entity rather than
+     * {@code getForObject} so the token travels with the request.</p>
      */
     public String getMemberTier(Long memberId) {
         String url = usersBaseUrl + "/api/members/{memberId}/tier";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(INTERNAL_TOKEN_HEADER, internalServiceToken);
+
         try {
-            MemberTierDto dto = restTemplate.getForObject(url, MemberTierDto.class, memberId);
+            MemberTierDto dto = restTemplate.exchange(
+                    url, HttpMethod.GET, new HttpEntity<>(headers), MemberTierDto.class, memberId).getBody();
             return dto != null ? dto.tier() : null;
         } catch (HttpClientErrorException.NotFound e) {
             // Contract Authority (§0.6.2, Contract 2): a 404 means the member does not exist;

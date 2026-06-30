@@ -117,6 +117,11 @@ public class DiscountServiceIT {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // security.internal.token has no default in application.properties (CWE-798 fix). UsersClient
+        // injects it (and sends it on the guarded tier read invoked by DiscountService), so an
+        // explicit test value is required for the context to start. The MockRestServiceServer tier
+        // stub matches on URI + method only (no header assertion), so the token header is transparent.
+        registry.add("security.internal.token", () -> "test-internal-token");
     }
 
     /**

@@ -44,6 +44,18 @@ import org.jboss.as.quickstarts.kitchensink.users.service.MemberSpendService;
  * creation to {@link MemberRegistration}, reads through {@link MemberRepository}, and returns the tier
  * DTO directly. There are no native queries and no outbound cross-service HTTP calls here -- this is a
  * pure producer edge.</p>
+ *
+ * <p><b>Access control.</b> Authorization is enforced at the web edge by registered interceptors
+ * (see {@code InternalSecurityConfig}), so the handler methods below stay free of inline security
+ * checks:</p>
+ * <ul>
+ *   <li>{@code GET /api/members} (list) — SERVICE/admin only (member PII of all members);</li>
+ *   <li>{@code GET /api/members/{id}} and {@code GET /api/members/{id}/tier} — the authenticated owner
+ *       of that member, or a trusted SERVICE caller;</li>
+ *   <li>{@code POST /api/members} (register) — intentionally UNAUTHENTICATED (200-OK parity), guarded
+ *       instead by a per-IP registration rate limiter;</li>
+ *   <li>{@code POST /api/members/{id}/spend} — trusted SERVICE token only (unchanged).</li>
+ * </ul>
  */
 @RestController
 @RequestMapping("/api/members")

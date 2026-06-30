@@ -72,6 +72,12 @@ class RemoteMemberRegistrationIT {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // security.internal.token has no default in application.properties (CWE-798 fix); supply an
+        // explicit value so the context starts. Raise the registration rate limit far above anything
+        // this black-box HTTP test issues so the public POST /users/api/members stays 200 (the test's
+        // core assertion is that unauthenticated registration succeeds), 400, and 409 as expected.
+        registry.add("security.internal.token", () -> "test-internal-token");
+        registry.add("security.registration.max-per-minute", () -> "1000000");
     }
 
     /**

@@ -64,6 +64,11 @@ class TierRecalculationIT {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // security.internal.token has no default in application.properties (CWE-798 fix); OrdersClient
+        // injects it (and sends it on the guarded spend read), so an explicit test value is required
+        // for the context to start. The MockRestServiceServer spend stub matches URI + method only.
+        registry.add("security.internal.token", () -> "test-internal-token");
+        registry.add("security.registration.max-per-minute", () -> "1000000");
     }
 
     /**

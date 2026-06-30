@@ -63,6 +63,11 @@ public class MemberSpendIT {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        // security.internal.token has no default in application.properties (CWE-798 fix); this test
+        // both needs it for context startup AND reads it via @Value to drive the spend-endpoint token
+        // guard (401 without / 200 with). High rate limit is harmless here (no registration POSTs).
+        registry.add("security.internal.token", () -> "test-internal-token");
+        registry.add("security.registration.max-per-minute", () -> "1000000");
     }
 
     @BeforeAll
