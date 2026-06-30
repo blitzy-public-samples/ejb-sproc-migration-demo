@@ -29,6 +29,7 @@ import jakarta.validation.Validator;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -102,9 +103,24 @@ public class MemberResourceRESTService {
             Map<String, String> responseObj = new HashMap<>();
             responseObj.put("email", "Email taken");
             return ResponseEntity.status(HttpStatus.CONFLICT).body(responseObj);
-        } catch (Exception e) {
+        } catch (DataIntegrityViolationException e) {
+            // Concurrent duplicate-email race (TOCTOU): two requests can both pass the
+            // emailAlreadyExists() pre-check before either INSERT commits, so the loser is rejected
+            // by the database unique constraint (member_email_key — the member table's ONLY UNIQUE
+            // constraint, on the email column) instead of by the pre-check. Map it to the SAME 409
+            // contract as the sequential duplicate path above (AAP 0.7.1), and NEVER surface the
+            // underlying SQL / constraint name to the client (information disclosure, CWE-209).
+            log.debug("Duplicate email rejected by database unique constraint (concurrent create race)");
             Map<String, String> responseObj = new HashMap<>();
-            responseObj.put("error", e.getMessage());
+            responseObj.put("email", "Email taken");
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(responseObj);
+        } catch (Exception e) {
+            // Defensive fallback for any other unexpected error. Log the full detail SERVER-SIDE for
+            // diagnosis, but return a sanitized, constant message to the client — never echo
+            // e.getMessage(), which can leak internal SQL/schema/stack details (CWE-209).
+            log.error("Unexpected error while creating member", e);
+            Map<String, String> responseObj = new HashMap<>();
+            responseObj.put("error", "An unexpected error occurred while processing the request");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(responseObj);
         }
     }

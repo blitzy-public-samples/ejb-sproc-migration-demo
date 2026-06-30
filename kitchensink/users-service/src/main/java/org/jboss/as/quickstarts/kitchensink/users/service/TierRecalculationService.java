@@ -1,6 +1,7 @@
 package org.jboss.as.quickstarts.kitchensink.users.service;
 
 import org.jboss.as.quickstarts.kitchensink.users.client.OrdersClient;
+import org.jboss.as.quickstarts.kitchensink.users.exception.ServiceUnavailableException;
 import org.jboss.as.quickstarts.kitchensink.users.model.Member;
 import org.jboss.as.quickstarts.kitchensink.users.repository.MemberRepository;
 
@@ -65,13 +66,34 @@ public class TierRecalculationService {
     /**
      * Startup trigger. Replaces the EJB {@code @Startup} eager-activation semantics so an initial
      * recalculation runs once the application is ready.
+     *
+     * <p><strong>Standalone-runtime resilience (AAP &sect;0.1.1/&sect;0.3 "independently deployable
+     * microservices"; &sect;0.6.5 cross-service fan-out):</strong> the startup recalculation reads
+     * each member's 90-day spend from orders-service over HTTP (Contract 3). If orders-service is
+     * unreachable (or returns {@code 5xx}) the {@link OrdersClient} raises a
+     * {@link ServiceUnavailableException}. That condition is caught here, logged at WARN and
+     * swallowed so the {@code ApplicationReadyEvent} listener can never abort
+     * {@code SpringApplication.run(...)}. users-service therefore boots and keeps serving the Member
+     * REST API in a degraded mode — tiers are simply not refreshed until the next successful
+     * recalculation. This mirrors the already-resilient nightly {@link #runNightlyTierRecalculation()}
+     * path (whose exceptions Spring's scheduler logs and suppresses) and honors the milestone
+     * requirement that a peer being down must never block this service's own startup.</p>
      */
     @EventListener(ApplicationReadyEvent.class)
     @Transactional
     public void onApplicationReady() {
         log.info("TierRecalculationService: startup tier recalculation triggered");
-        recalculateAllTiers();
-        log.info("TierRecalculationService: startup tier recalculation complete");
+        try {
+            recalculateAllTiers();
+            log.info("TierRecalculationService: startup tier recalculation complete");
+        } catch (ServiceUnavailableException ex) {
+            // orders-service unreachable / 5xx during the per-member Contract 3 fan-out. Degrade
+            // gracefully instead of aborting the application context: log and continue so the
+            // service stays UP (Standalone Runtime). Tiers refresh on the next successful run.
+            log.warn("TierRecalculationService: startup tier recalculation skipped because "
+                    + "orders-service is unavailable ({}); users-service remains UP and will "
+                    + "refresh tiers on the next successful recalculation.", ex.getMessage());
+        }
     }
 
     /**
