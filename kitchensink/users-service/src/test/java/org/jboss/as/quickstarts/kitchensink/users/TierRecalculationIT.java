@@ -3,11 +3,13 @@ package org.jboss.as.quickstarts.kitchensink.users;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 import org.jboss.as.quickstarts.kitchensink.users.model.Member;
@@ -130,6 +132,18 @@ class TierRecalculationIT {
                         MediaType.APPLICATION_JSON));
     }
 
+    /**
+     * Helper: stubs Contract 3 for a member with a 500 response, so {@code OrdersClient.getMemberSpend}
+     * maps it to a {@code ServiceUnavailableException} (a {@code RuntimeException}). Used to verify the
+     * scheduled run isolates a single member's downstream failure and keeps processing the others.
+     */
+    private void stubSpendServerError(Long memberId) {
+        mockServer.expect(ExpectedCount.manyTimes(),
+                        requestTo(containsString("/internal/members/" + memberId + "/spend")))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withServerError());
+    }
+
     @Test
     void testNewMemberRemainsBronze() {
         Member member = createTestMember("BRONZE", BigDecimal.ZERO);
@@ -176,5 +190,68 @@ class TierRecalculationIT {
         Member updated = memberRepository.findById(member.getId()).orElseThrow();
         Assertions.assertEquals("BRONZE", updated.getTier(),
                 "GOLD member with all orders > 91 days old should drop to BRONZE (no qualifying 90-day spend)");
+    }
+
+    /**
+     * Persist-only-on-change (checkpoint coverage gap). When the recomputed tier equals the member's
+     * current tier, the service must NOT write the row: both {@code tier} and {@code tier_updated_at}
+     * stay exactly as they were (the SQL {@code WHERE tier IS DISTINCT FROM ...} guard).
+     *
+     * <p>The member starts at SILVER with a fixed, known {@code tier_updated_at}. The stubbed 90-day
+     * spend ($750) recomputes to SILVER -- unchanged -- so no {@code save} occurs and the stamped
+     * timestamp is preserved. The before/after timestamps are both read back from the database so the
+     * equality check is exact (no in-memory vs. JDBC precision mismatch).</p>
+     */
+    @Test
+    void testNoChangeLeavesTierAndTimestampUnchanged() {
+        // Member already at the tier its spend maps to, with a known, clearly-old tier_updated_at.
+        Member member = createTestMember("SILVER", new BigDecimal("750.00"));
+        member.setTierUpdatedAt(LocalDateTime.of(2020, 1, 1, 0, 0, 0));
+        memberRepository.save(member);
+
+        // Read the DB-stored timestamp so the post-run comparison is precision-exact.
+        Member before = memberRepository.findById(member.getId()).orElseThrow();
+        LocalDateTime tsBefore = before.getTierUpdatedAt();
+        Assertions.assertNotNull(tsBefore, "precondition: tier_updated_at should be stamped");
+
+        // $750 -> computeTier -> SILVER, which equals the current tier: nothing should be persisted.
+        stubSpend(member.getId(), new BigDecimal("750.00"));
+        tierRecalculationService.triggerRecalculation();
+
+        Member after = memberRepository.findById(member.getId()).orElseThrow();
+        Assertions.assertEquals("SILVER", after.getTier(),
+                "Tier must remain SILVER when the recomputed tier equals the current tier");
+        Assertions.assertEquals(tsBefore, after.getTierUpdatedAt(),
+                "tier_updated_at must NOT change when the tier is unchanged (persist-only-on-change)");
+    }
+
+    /**
+     * Per-member failure isolation (F6 / reliability coverage gap). A single member's spend-lookup
+     * failure must NOT abort the whole recalculation run: every other member is still processed.
+     *
+     * <p>Two BRONZE members are created. The healthy member's spend stubs to $3,000 (-> GOLD); the
+     * other member's spend endpoint returns 500, which {@code OrdersClient} translates to a
+     * {@code ServiceUnavailableException}. After the run, the healthy member is upgraded to GOLD
+     * (proving the loop continued past the failure) and the failed member is left unchanged at
+     * BRONZE (proving the failure produced no partial/incorrect write).</p>
+     */
+    @Test
+    void testRecalculationIsolatesPerMemberDownstreamFailure() {
+        Member memberOk = createTestMember("BRONZE", BigDecimal.ZERO);
+        Member memberFail = createTestMember("BRONZE", BigDecimal.ZERO);
+
+        stubSpend(memberOk.getId(), new BigDecimal("3000.00")); // -> GOLD
+        stubSpendServerError(memberFail.getId());               // -> ServiceUnavailableException
+
+        // Must not throw: the per-member try/catch isolates the failing member.
+        tierRecalculationService.triggerRecalculation();
+
+        Member okAfter = memberRepository.findById(memberOk.getId()).orElseThrow();
+        Member failAfter = memberRepository.findById(memberFail.getId()).orElseThrow();
+
+        Assertions.assertEquals("GOLD", okAfter.getTier(),
+                "Healthy member must still be recalculated when another member's spend lookup fails");
+        Assertions.assertEquals("BRONZE", failAfter.getTier(),
+                "Member whose spend lookup failed must be left unchanged (no partial update)");
     }
 }

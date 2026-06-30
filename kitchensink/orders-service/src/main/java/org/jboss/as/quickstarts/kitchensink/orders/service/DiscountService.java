@@ -39,11 +39,29 @@ public class DiscountService {
     /**
      * Reproduces apply_customer_discount (db/02_stored_procedures.sql L111-146):
      * resolve tier -> pct, amt = ROUND(baseTotal * pct, 2), persist a discount_audit row, return amt.
+     *
+     * <p>This entry point resolves the member tier itself over HTTP (Contract 2) and is the form
+     * used by standalone callers (e.g. DiscountServiceIT). When the caller has ALREADY resolved the
+     * tier for this member in the same unit of work -- as {@code OrderService.orchestrateOrder()} does
+     * for its member-existence guard -- it should call the {@link #calculateDiscount(Long, BigDecimal,
+     * String)} overload instead to avoid a redundant tier round-trip.</p>
      */
     public BigDecimal calculateDiscount(Long memberId, BigDecimal baseTotal) {
         // Tier resolved over HTTP (Contract 2) instead of the original member-table read.
         String tier = usersClient.getMemberTier(memberId);
+        return calculateDiscount(memberId, baseTotal, tier);
+    }
 
+    /**
+     * Tier-supplied overload of {@link #calculateDiscount(Long, BigDecimal)}. Identical observable
+     * behavior (pct lookup, 2 dp rounding, discount_audit side effect) but uses the {@code tier}
+     * provided by the caller rather than issuing its own Contract-2 tier lookup.
+     *
+     * <p>Introduced so {@code OrderService.orchestrateOrder()} can reuse the tier it already fetched
+     * for the member-existence guard (§0.6.4 / GAP), keeping a single tier HTTP call per order while
+     * preserving the exact discount algorithm and the audit-on-every-call side effect.</p>
+     */
+    public BigDecimal calculateDiscount(Long memberId, BigDecimal baseTotal, String tier) {
         // CASE v_tier WHEN 'PLATINUM' ... ELSE 0.02 (BRONZE) END (SQL L120-126).
         BigDecimal pct;
         if ("PLATINUM".equals(tier)) {

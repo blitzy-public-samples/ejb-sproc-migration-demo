@@ -17,14 +17,18 @@
 package org.jboss.as.quickstarts.kitchensink.orders;
 
 import static org.hamcrest.Matchers.containsString;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 
+import org.jboss.as.quickstarts.kitchensink.orders.exception.EmptyCartException;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.repository.OrderDraftItemRepository;
 import org.jboss.as.quickstarts.kitchensink.orders.service.OrderService;
@@ -37,6 +41,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -355,6 +360,107 @@ public class OrderServiceIT {
         orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
 
         // Asserts quote (>=1), tier (>=1), and spend (exactly once) all occurred -> total_spend would increase.
+        mockServer.verify();
+    }
+
+    /**
+     * Test 6 (parity): {@code previewOrder()} must reproduce the {@code process_order} numbers
+     * EXACTLY against the seed values, not merely "non-zero" (closing the review's exact-parity gap).
+     *
+     * <p>Single line: product&nbsp;1, qty&nbsp;5, stubbed unit price 9.1692, weight 0.55/unit; member&nbsp;2
+     * is SILVER; destination ZIP 27601 maps to seeded zone&nbsp;2 (Southeast, base rate 0.9500).</p>
+     * <ul>
+     *   <li>subtotal = ROUND(9.1692 &times; 5, 2) = ROUND(45.846) = <b>45.85</b></li>
+     *   <li>discount = ROUND(45.85 &times; 0.05 [SILVER], 2) = ROUND(2.2925) = <b>2.29</b></li>
+     *   <li>shipping = MAX(5.99, 0.9500 &times; (0.55 &times; 5 = 2.75) = 2.6125) = <b>5.99</b> (no expedite)</li>
+     *   <li>total = 45.85 &minus; 2.29 + 5.99 = <b>49.55</b></li>
+     * </ul>
+     * Assertions use {@link BigDecimal#compareTo} so they are scale-insensitive (49.55 == 49.5500).
+     */
+    @Test
+    public void testPreviewOrderExactParity() {
+        expectQuote();
+        expectTier();
+        orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
+
+        OrderService.OrderPreview preview = orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false);
+
+        Assertions.assertEquals(0, preview.getSubtotal().compareTo(new BigDecimal("45.85")),
+                "subtotal parity: ROUND(9.1692 x 5) -> 45.85, got " + preview.getSubtotal());
+        Assertions.assertEquals(0, preview.getDiscountAmount().compareTo(new BigDecimal("2.29")),
+                "discount parity: SILVER 5% of 45.85 -> 2.29, got " + preview.getDiscountAmount());
+        Assertions.assertEquals(0, preview.getShippingCost().compareTo(new BigDecimal("5.99")),
+                "shipping parity: MAX(5.99, 0.95 x 2.75) -> 5.99, got " + preview.getShippingCost());
+        Assertions.assertEquals(0, preview.getTotal().compareTo(new BigDecimal("49.55")),
+                "total parity: 45.85 - 2.29 + 5.99 -> 49.55, got " + preview.getTotal());
+    }
+
+    /**
+     * Test 7 (negative guard): an EMPTY cart must be rejected (process_order guard SQL L224-232,
+     * ERRCODE P0004) BEFORE any line/discount/shipping/persist work. Guard&nbsp;1 (member-exists)
+     * runs first and succeeds (the tier resolves), then Guard&nbsp;2 throws {@link EmptyCartException}
+     * (HTTP 400). This prevents {@code submitOrder()} from ever persisting a confirmed zero-line order
+     * and erroneously firing a spend increment.
+     */
+    @Test
+    public void testPreviewOrderRejectsEmptyCart() {
+        expectTier();
+        // Cart is empty (cleared in setUp); deliberately add nothing.
+        Assertions.assertThrows(EmptyCartException.class,
+                () -> orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false),
+                "An empty cart must be rejected with EmptyCartException before any calculation/persist");
+    }
+
+    /**
+     * Test 8 (negative guard): a member ABSENT from users-service must be rejected (process_order
+     * guard SQL L217-221, ERRCODE P0003). The Contract-2 tier probe (Guard&nbsp;1) returns 404, which
+     * {@code UsersClient} maps to {@link MemberNotFoundException} (HTTP 404) -- and because the
+     * member check precedes the cart check, it fires even with a non-empty cart and BEFORE any
+     * marketplace quote is requested.
+     */
+    @Test
+    public void testOrchestrateOrderRejectsMissingMember() {
+        mockServer.expect(ExpectedCount.manyTimes(),
+                requestTo(containsString("/api/members/" + TEST_MEMBER_ID + "/tier")))
+            .andExpect(method(HttpMethod.GET))
+            .andRespond(withStatus(HttpStatus.NOT_FOUND));
+
+        // Non-empty cart proves the member guard fires FIRST (before the empty-cart and quote steps).
+        orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
+
+        Assertions.assertThrows(MemberNotFoundException.class,
+                () -> orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false),
+                "A member absent from users-service must surface as MemberNotFoundException (404)");
+    }
+
+    /**
+     * Test 9 (GAP-3 idempotency contract): {@code submitOrder()} must transmit BOTH the persisted
+     * {@code orderId} idempotency key AND the exact order total on the post-commit spend increment.
+     *
+     * <p>The orderId is the globally-unique orders PK that lets users-service apply each order's spend
+     * at most once (the durable correctness mechanism, AAP &sect;0.6.6); the amount is the exact parity
+     * total (49.55, see {@link #testPreviewOrderExactParity()}). This asserts the request body shape
+     * {@code {"orderId":<number>,"amount":49.55}} -- the orders-side half of the idempotency design.
+     * (The users-side proof that a repeated orderId is applied only once lives in users-service's
+     * {@code MemberSpendIT}.)</p>
+     */
+    @Test
+    public void testSubmitOrderSendsOrderIdAndAmountForIdempotency() {
+        expectQuote();
+        expectTier();
+        mockServer.expect(ExpectedCount.once(),
+                requestTo(containsString("/api/members/" + TEST_MEMBER_ID + "/spend")))
+            .andExpect(method(HttpMethod.POST))
+            .andExpect(jsonPath("$.orderId").exists())
+            .andExpect(jsonPath("$.orderId").isNumber())
+            .andExpect(jsonPath("$.amount").value(49.55))
+            .andRespond(withSuccess());
+
+        orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
+        Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
+
+        Assertions.assertNotNull(orderId, "submitOrder() should return the persisted order id");
+        // Confirms the spend POST fired exactly once carrying the orderId key + the 49.55 total.
         mockServer.verify();
     }
 }

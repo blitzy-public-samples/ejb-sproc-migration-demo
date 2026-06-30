@@ -114,9 +114,11 @@ curl http://localhost:8083/users/actuator/health
 
 The original REST endpoints are preserved, each under its service's base mapping. Example calls:
 
+NOTE: The marketplace-service product-catalog endpoint (`GET /marketplace/api/products`) is served by the marketplace producer controller (`ProductResourceRESTService`), which is delivered in the final step of the migration. Until that controller is in place, the marketplace-service still boots and its `/marketplace/actuator/health` endpoint responds `UP`, but `GET /marketplace/api/products` is not yet available. The orders-service and users-service endpoints shown below are available now.
+
 [source,bash]
 ----
-# marketplace-service — product catalog
+# marketplace-service — product catalog (available after the final marketplace producer controller is in place)
 curl http://localhost:8081/marketplace/api/products
 
 # orders-service — look up an order by id

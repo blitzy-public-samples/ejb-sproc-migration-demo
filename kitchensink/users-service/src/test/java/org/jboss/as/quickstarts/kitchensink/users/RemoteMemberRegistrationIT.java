@@ -120,4 +120,52 @@ class RemoteMemberRegistrationIT {
         Assertions.assertEquals("", response.body(),
                 "Member-create response body should be empty");
     }
+
+    /**
+     * Black-box helper: POSTs the given JSON body to {@code /users/api/members} over real HTTP and
+     * returns the full response. Kept a plain JSON String to preserve the true black-box stance (no
+     * production type is imported).
+     */
+    private HttpResponse<String> postMember(String json) throws Exception {
+        URI endpoint = URI.create("http://localhost:" + port + "/users/api/members");
+        HttpRequest request = HttpRequest.newBuilder(endpoint)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * Duplicate-email semantics at the REST edge (checkpoint coverage gap). Over real HTTP, the first
+     * POST of a unique email returns 200 and a second POST of the SAME email returns 409 Conflict
+     * (the controller's duplicate-email guard). The email is unique to this test, so the assertion is
+     * independent of test execution order.
+     */
+    @Test
+    void testDuplicateEmailReturns409() throws Exception {
+        String json = "{\"name\":\"Remote Dup\","
+                + "\"email\":\"remote.dup.f15@mailinator.com\","
+                + "\"phoneNumber\":\"2125559876\"}";
+
+        Assertions.assertEquals(200, postMember(json).statusCode(),
+                "first registration of a unique email should return HTTP 200");
+        Assertions.assertEquals(409, postMember(json).statusCode(),
+                "re-registering the same email should return HTTP 409 Conflict");
+    }
+
+    /**
+     * Bean-Validation semantics at the REST edge (checkpoint coverage gap). A malformed payload is
+     * rejected with 400 over real HTTP: {@code name} contains a digit ({@code @Pattern("[^0-9]*")}),
+     * {@code email} is not a valid address ({@code @Email}), and {@code phoneNumber} is non-numeric
+     * and too short ({@code @Size}/{@code @Digits}).
+     */
+    @Test
+    void testInvalidMemberReturns400() throws Exception {
+        String invalidJson = "{\"name\":\"Bad9 Name\","
+                + "\"email\":\"nope\","
+                + "\"phoneNumber\":\"xx\"}";
+
+        Assertions.assertEquals(400, postMember(invalidJson).statusCode(),
+                "an invalid member payload should be rejected with HTTP 400 Bad Request");
+    }
 }

@@ -1,5 +1,8 @@
 package org.jboss.as.quickstarts.kitchensink.users;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
 import java.sql.Connection;
 import java.sql.DriverManager;
 
@@ -9,11 +12,14 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -38,6 +44,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * persist so the database-generated id is real and observable on the in-memory entity.</p>
  */
 @SpringBootTest
+@AutoConfigureMockMvc
 @Testcontainers
 class MemberRegistrationIT {
 
@@ -79,6 +86,9 @@ class MemberRegistrationIT {
     @Autowired
     private MemberRegistration memberRegistration;
 
+    @Autowired
+    private MockMvc mockMvc;
+
     /**
      * Registers a new member and asserts the database assigned a non-null generated id, mirroring
      * the legacy test exactly. Declares {@code throws Exception} because
@@ -95,5 +105,54 @@ class MemberRegistrationIT {
 
         Assertions.assertNotNull(newMember.getId(),
                 newMember.getName() + " should have been persisted with a non-null id");
+    }
+
+    /**
+     * Duplicate-email REST semantics (checkpoint coverage gap). Drives the real
+     * {@code POST /api/members} edge through {@link MockMvc}: the first create succeeds with 200 OK
+     * (the legacy {@code Response.ok().build()} contract, preserved), and a second create with the
+     * SAME email is rejected by the controller's duplicate-email guard as 409 Conflict
+     * (the {@code ValidationException} -> {@code handleDuplicateEmail} mapping).
+     *
+     * <p>The email is unique to this test (it is neither a seeded address nor the one used by
+     * {@link #testRegister()}), so the assertion is independent of test execution order.</p>
+     */
+    @Test
+    void testDuplicateEmailReturns409() throws Exception {
+        String json = "{\"name\":\"Dup Tester\","
+                + "\"email\":\"dup.f13@mailinator.com\","
+                + "\"phoneNumber\":\"2125550000\"}";
+
+        // First registration of this email -> 200 OK.
+        mockMvc.perform(post("/api/members")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isOk());
+
+        // Re-registering the same email -> 409 Conflict (duplicate-email semantics preserved).
+        mockMvc.perform(post("/api/members")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isConflict());
+    }
+
+    /**
+     * Bean-Validation REST semantics (checkpoint coverage gap). A malformed member payload is
+     * rejected with 400 Bad Request before any persistence. The payload violates three constraints
+     * at once -- {@code name} contains digits ({@code @Pattern("[^0-9]*")}), {@code email} is not a
+     * valid address ({@code @Email}), and {@code phoneNumber} is non-numeric and too short
+     * ({@code @Size}/{@code @Digits}) -- exercising the {@code @Valid @RequestBody Member} path that
+     * resolves to {@code handleValidationErrors} (400).
+     */
+    @Test
+    void testInvalidMemberReturns400() throws Exception {
+        String invalidJson = "{\"name\":\"John123\","
+                + "\"email\":\"not-an-email\","
+                + "\"phoneNumber\":\"abc\"}";
+
+        mockMvc.perform(post("/api/members")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(invalidJson))
+                .andExpect(status().isBadRequest());
     }
 }

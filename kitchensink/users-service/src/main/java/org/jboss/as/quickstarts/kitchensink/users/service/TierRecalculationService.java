@@ -78,21 +78,43 @@ public class TierRecalculationService {
      *
      * <p>NOT @Transactional: the cross-service HTTP call (ordersClient.getMemberSpend) must run
      * outside any transaction boundary (AAP 0.7.2); each changed member is saved individually.</p>
+     *
+     * <p><b>Per-member failure isolation.</b> The spend lookup fans out one HTTP call per member, so
+     * a single downstream failure (e.g. orders-service briefly unavailable -> ServiceUnavailableException)
+     * must NOT abort the whole nightly run. Each member is processed in its own try/catch: a failure is
+     * logged WITHOUT PII (member id only) and recalculation continues with the remaining members. A
+     * summary count of processed/updated/failed members is logged at the end for observability.</p>
      */
     private void recalculateAllTiers() {
         List<Member> members = memberRepository.findAll();
+        int processed = 0;
+        int updated = 0;
+        int failed = 0;
         for (Member member : members) {
-            // Cross-service HTTP (Contract 3) replaces the in-DB 90-day orders SUM. Outside any tx.
-            BigDecimal spend = ordersClient.getMemberSpend(member.getId(), SPEND_WINDOW_DAYS);
-            String newTier = computeTier(spend);
+            try {
+                // Cross-service HTTP (Contract 3) replaces the in-DB 90-day orders SUM. Outside any tx.
+                BigDecimal spend = ordersClient.getMemberSpend(member.getId(), SPEND_WINDOW_DAYS);
+                String newTier = computeTier(spend);
 
-            // UPDATE ... WHERE tier IS DISTINCT FROM v_new_tier -> persist ONLY when changed (SQL L318-323).
-            if (!newTier.equals(member.getTier())) {
-                member.setTier(newTier);
-                member.setTierUpdatedAt(LocalDateTime.now());
-                memberRepository.save(member);
+                // UPDATE ... WHERE tier IS DISTINCT FROM v_new_tier -> persist ONLY when changed (SQL L318-323).
+                if (!newTier.equals(member.getTier())) {
+                    member.setTier(newTier);
+                    member.setTierUpdatedAt(LocalDateTime.now());
+                    memberRepository.save(member);
+                    updated++;
+                }
+                processed++;
+            } catch (RuntimeException e) {
+                // Isolate the failure to this member: log without PII (id only, never name/email) and
+                // continue. e.toString() includes only the exception type and a message that itself
+                // carries no PII (it references the member id at most).
+                failed++;
+                log.warn("Tier recalculation skipped for member id={} due to a downstream failure: {}",
+                        member.getId(), e.toString());
             }
         }
+        log.info("Tier recalculation summary: {} processed, {} updated, {} failed (of {} members)",
+                processed, updated, failed, members.size());
     }
 
     /**

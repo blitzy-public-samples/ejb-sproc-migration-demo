@@ -6,19 +6,16 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import org.jboss.as.quickstarts.kitchensink.orders.client.MarketplaceClient;
 import org.jboss.as.quickstarts.kitchensink.orders.client.ProductQuoteDto;
 import org.jboss.as.quickstarts.kitchensink.orders.client.UsersClient;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.EmptyCartException;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.model.OrderDraftItem;
-import org.jboss.as.quickstarts.kitchensink.orders.model.OrderItem;
 import org.jboss.as.quickstarts.kitchensink.orders.repository.OrderDraftItemRepository;
-import org.jboss.as.quickstarts.kitchensink.orders.repository.OrderItemRepository;
 import org.jboss.as.quickstarts.kitchensink.orders.repository.OrderRepository;
 
 /**
@@ -37,43 +34,35 @@ import org.jboss.as.quickstarts.kitchensink.orders.repository.OrderRepository;
 @Service
 public class OrderService {
 
-    // Constructor injection (single constructor -> no @Autowired required).
+    // Constructor injection ONLY (single constructor -> no @Autowired required; no field injection).
     private final OrderRepository orderRepository;
-    private final OrderItemRepository orderItemRepository;
     private final OrderDraftItemRepository orderDraftItemRepository;
     private final MarketplaceClient marketplaceClient;
     private final UsersClient usersClient;
     private final DiscountService discountService;
     private final ShippingService shippingService;
+    // Dedicated transactional collaborator that owns the order/items/cart-clear persistence boundary.
+    // Replaces the former @Autowired @Lazy self-proxy: submitOrder() stays NON-transactional (so the
+    // cross-service HTTP in orchestrateOrder() runs outside any transaction, §0.7.2), and the
+    // @Transactional persist step is reached through this ordinary collaborator bean rather than a
+    // self-injected proxy -- honoring the constructor-injection-only rule.
+    private final OrderPersistenceService orderPersistenceService;
 
     public OrderService(OrderRepository orderRepository,
-                        OrderItemRepository orderItemRepository,
                         OrderDraftItemRepository orderDraftItemRepository,
                         MarketplaceClient marketplaceClient,
                         UsersClient usersClient,
                         DiscountService discountService,
-                        ShippingService shippingService) {
+                        ShippingService shippingService,
+                        OrderPersistenceService orderPersistenceService) {
         this.orderRepository = orderRepository;
-        this.orderItemRepository = orderItemRepository;
         this.orderDraftItemRepository = orderDraftItemRepository;
         this.marketplaceClient = marketplaceClient;
         this.usersClient = usersClient;
         this.discountService = discountService;
         this.shippingService = shippingService;
+        this.orderPersistenceService = orderPersistenceService;
     }
-
-    /**
-     * Self-reference to this bean's Spring proxy, injected lazily to avoid a constructor-time
-     * circular dependency. submitOrder() is intentionally NOT @Transactional (so the cross-service
-     * HTTP performed in orchestrateOrder() runs OUTSIDE any transaction, per §0.7.2); it must
-     * therefore invoke the @Transactional persistConfirmedOrder() THROUGH this proxy rather than via
-     * 'this'. A plain self-invocation ('this.persistConfirmedOrder(...)') would bypass the proxy, the
-     * @Transactional boundary would not be applied, and the derived deleteByMemberId() cart-clear
-     * would fail with TransactionRequiredException for lack of an active transaction.
-     */
-    @Autowired
-    @Lazy
-    private OrderService self;
 
     // ----- cart operations -----
 
@@ -94,16 +83,40 @@ public class OrderService {
     // ----- order orchestration (single shared source of truth) -----
 
     /**
-     * Reproduces the calculation core of process_order (db/02_stored_procedures.sql L196-290):
-     * for each draft item resolve a marketplace quote {vendorId, unitPrice, weightLbs},
-     * lineTotal = ROUND(unitPrice * qty, 2), accumulate subtotal and total weight; then apply the
+     * Reproduces the calculation core of process_order (db/02_stored_procedures.sql L196-290),
+     * INCLUDING its two leading guards (SQL L216-232):
+     * <ol>
+     *   <li><b>member-exists</b> (SQL L217-221, {@code RAISE ... ERRCODE 'P0003'}): the member is
+     *       validated through the users-service Contract-2 tier endpoint. A missing member surfaces
+     *       as {@link org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException}
+     *       (HTTP 404). The resolved tier is reused for the discount step so no second HTTP call is
+     *       made; and</li>
+     *   <li><b>cart-not-empty</b> (SQL L224-232, {@code RAISE ... ERRCODE 'P0004'}): an empty draft
+     *       cart is rejected with {@link EmptyCartException} (HTTP 400) BEFORE any line, discount,
+     *       shipping, or persistence work -- preventing a confirmed zero-subtotal order that would
+     *       still apply the shipping floor and trigger a spend increment.</li>
+     * </ol>
+     * Then, for each draft item resolve a marketplace quote {vendorId, unitPrice, weightLbs},
+     * lineTotal = ROUND(unitPrice * qty, 2), accumulate subtotal and total weight; apply the
      * customer discount and shipping; total = subtotal - discount + shipping.
      *
-     * ALL cross-service HTTP (marketplace quotes + users tier, the latter inside DiscountService)
-     * occurs HERE, before any transaction is opened.
+     * <p>ALL cross-service HTTP (the member/tier lookup + marketplace quotes) occurs HERE, before any
+     * transaction is opened (transaction-vs-HTTP ordering, §0.7.2). The guard order mirrors the
+     * stored procedure: member existence is checked before the empty-cart check.</p>
      */
     private OrderPreview orchestrateOrder(Long memberId, String destinationZip, boolean expedite) {
+        // Guard 1 -- member exists (SQL L217-221). The users-service tier endpoint (Contract 2) is the
+        // member's system of record; a 404 there maps (in UsersClient) to MemberNotFoundException ->
+        // HTTP 404. The returned tier is reused below for the discount, so this existence probe costs
+        // no extra round-trip.
+        String tier = usersClient.getMemberTier(memberId);
+
+        // Guard 2 -- cart not empty (SQL L224-232). Reject an empty cart before any calculation or
+        // persistence so a confirmed empty order can never be created.
         List<OrderDraftItem> draftItems = orderDraftItemRepository.findByMemberId(memberId);
+        if (draftItems.isEmpty()) {
+            throw new EmptyCartException("Cart is empty for member " + memberId);
+        }
 
         BigDecimal subtotal = BigDecimal.ZERO;
         BigDecimal totalWeight = BigDecimal.ZERO;
@@ -128,7 +141,9 @@ public class OrderService {
         }
 
         // v_discount_amt := apply_customer_discount(p_member_id, v_subtotal) (SQL L262).
-        BigDecimal discountAmount = discountService.calculateDiscount(memberId, subtotal);
+        // Reuse the tier already resolved by Guard 1 (3-arg overload) so the discount step does NOT
+        // issue a second tier HTTP call for the same order.
+        BigDecimal discountAmount = discountService.calculateDiscount(memberId, subtotal, tier);
         // v_shipping_cost := calculate_shipping(p_destination_zip, v_total_weight, p_expedite) (SQL L265).
         BigDecimal shippingCost = shippingService.calculateShipping(destinationZip, totalWeight, expedite);
         // v_total := v_subtotal - v_discount_amt + v_shipping_cost (SQL L268).
@@ -148,68 +163,36 @@ public class OrderService {
     /**
      * Orchestrates the order (all cross-service HTTP completes FIRST, outside any transaction),
      * then persists the CONFIRMED order + items and clears the draft cart inside a single local
-     * @Transactional boundary, and finally -- AFTER commit -- triggers the member-spend increment.
+     * @Transactional boundary (delegated to {@link OrderPersistenceService}), and finally -- AFTER
+     * commit -- triggers the idempotent member-spend increment.
      */
     public Long submitOrder(Long memberId, String destinationZip, boolean expedite) {
-        // Phase 1: calculation/preview. All marketplace + users HTTP happens here, BEFORE the tx.
+        // Phase 1: calculation/preview. All marketplace + users HTTP happens here, BEFORE the tx
+        // (this also runs the member-exists and empty-cart guards; see orchestrateOrder()).
         OrderPreview preview = orchestrateOrder(memberId, destinationZip, expedite);
 
-        // Phase 2: single local transactional persist (order + items + cart clear). Invoked through
-        // the 'self' proxy (not 'this') so the @Transactional boundary on persistConfirmedOrder is
-        // actually applied -- a direct self-invocation would bypass the proxy.
-        Long orderId = self.persistConfirmedOrder(memberId, preview);
+        // Phase 2: single local transactional persist (order + items + cart clear). Delegated to the
+        // constructor-injected OrderPersistenceService whose persistConfirmedOrder() carries the
+        // @Transactional boundary; this ordinary cross-bean call (no self-proxy) ensures the boundary
+        // is applied so the order, its items, and the cart-clear commit atomically.
+        Long orderId = orderPersistenceService.persistConfirmedOrder(memberId, preview);
 
-        // Phase 3: GAP-3 (§0.6.6) member total_spend increment. Intentionally POST-COMMIT and
-        // outside the orders transaction: orders-service must not write the member table, and the
-        // call crosses a service boundary over HTTP. It is therefore eventually consistent -- the
-        // order can commit even if this increment fails, and the nightly tier recalculation in
-        // users-service re-derives spend from CONFIRMED order history as the backstop. The call
-        // MUST occur because OrderServiceIT asserts total_spend increases on submit.
-        usersClient.incrementMemberSpend(memberId, preview.getTotal());
+        // Phase 3: GAP-3 (§0.6.6) member total_spend increment. Intentionally POST-COMMIT and outside
+        // the orders transaction: orders-service must not write the member table, and the call crosses
+        // a service boundary over HTTP. It is therefore eventually consistent -- the order can commit
+        // even if this increment fails.
+        //
+        // IDEMPOTENCY (§0.6.6 recommended resolution): the just-persisted orderId is passed as an
+        // idempotency key. orders.id is the orders table's globally-unique primary key, so users-service
+        // applies each order's spend AT MOST ONCE even if this post-commit call is retried or duplicated
+        // (the dedupe lives in users-service's MemberSpendService). This is the durable correctness
+        // guarantee for total_spend; it does NOT rely on the nightly tier recalculation reconciling
+        // spend (that job recomputes only the tier, from the trailing-90-day window, and never rewrites
+        // the lifetime total_spend column). The call MUST occur because OrderServiceIT asserts the
+        // post-commit increment fires exactly once, carrying the orderId key and the order total.
+        usersClient.incrementMemberSpend(memberId, orderId, preview.getTotal());
 
         return orderId;
-    }
-
-    /**
-     * Single local @Transactional boundary: persist the CONFIRMED Order, persist its OrderItem
-     * rows, and clear the member's draft cart. No cross-service HTTP occurs inside this method.
-     *
-     * NOTE (Spring proxying): submitOrder() invokes this method through the injected 'self' proxy
-     * (NOT via 'this'), so this @Transactional boundary IS applied and the order, its items, and the
-     * derived deleteByMemberId() cart-clear all commit together as one atomic unit. The cart-clear in
-     * particular REQUIRES this ambient transaction: a derived delete query (SELECT + em.remove) is not
-     * self-transactional the way SimpleJpaRepository.save() is, so without the boundary it would throw
-     * TransactionRequiredException. submitOrder() itself is deliberately NOT annotated @Transactional
-     * so that no transaction is open while the cross-service HTTP calls in orchestrateOrder() run (the
-     * transaction-vs-HTTP ordering rule, §0.7.2).
-     */
-    @Transactional
-    public Long persistConfirmedOrder(Long memberId, OrderPreview preview) {
-        Order order = new Order();
-        order.setMemberId(memberId);
-        order.setStatus("CONFIRMED");
-        order.setSubtotal(preview.getSubtotal());
-        order.setDiscountAmount(preview.getDiscountAmount());
-        order.setShippingCost(preview.getShippingCost());
-        order.setTotal(preview.getTotal());
-        order.setCreatedAt(LocalDateTime.now());
-        Order saved = orderRepository.save(order);
-
-        for (LineItemPreview line : preview.getItems()) {
-            OrderItem item = new OrderItem();
-            item.setOrderId(saved.getId());
-            item.setProductId(line.getProductId());
-            item.setVendorId(line.getVendorId());
-            item.setQuantity(line.getQuantity());
-            item.setUnitPrice(line.getUnitPrice());
-            item.setLineTotal(line.getLineTotal());
-            orderItemRepository.save(item);
-        }
-
-        // Clear the draft cart (DELETE FROM order_draft_items WHERE member_id = ...) (SQL L284).
-        orderDraftItemRepository.deleteByMemberId(memberId);
-
-        return saved.getId();
     }
 
     // ----- queries -----
@@ -226,10 +209,15 @@ public class OrderService {
      * Producer support for Contract 3 (GET /internal/members/{id}/spend?days=): sum of total for
      * the member's CONFIRMED orders since (now - days). Computed in Java over a derived-query load
      * (never a native query).
+     *
+     * <p>The cutoff comparison is INCLUSIVE ({@code created_at >= now - days}) to match the stored
+     * procedure / AAP semantics ({@code created_at >= NOW() - INTERVAL '90 days'},
+     * db/02_stored_procedures.sql); an order placed exactly at the window boundary still counts.</p>
      */
     public BigDecimal computeMemberSpend(Long memberId, int days) {
         LocalDateTime cutoff = LocalDateTime.now().minusDays(days);
-        List<Order> orders = orderRepository.findByMemberIdAndStatusAndCreatedAtAfter(memberId, "CONFIRMED", cutoff);
+        List<Order> orders =
+                orderRepository.findByMemberIdAndStatusAndCreatedAtGreaterThanEqual(memberId, "CONFIRMED", cutoff);
         BigDecimal sum = BigDecimal.ZERO;
         for (Order order : orders) {
             if (order.getTotal() != null) {

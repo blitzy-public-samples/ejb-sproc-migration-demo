@@ -31,7 +31,10 @@ public class MemberRegistration {
 
     @Transactional
     public void register(Member member) throws Exception {
-        log.info("Registering {}", member.getName());
+        // Persist first, then log only the database-generated id at DEBUG. The member's name is PII
+        // and must not appear in normal application logs (the previous INFO log of member.getName()
+        // exposed personal data on every registration); the non-PII id is sufficient for correlation.
         memberRepository.save(member);
+        log.debug("Registered member id={}", member.getId());
     }
 }

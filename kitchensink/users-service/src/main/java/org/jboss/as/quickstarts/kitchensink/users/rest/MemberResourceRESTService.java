@@ -1,6 +1,5 @@
 package org.jboss.as.quickstarts.kitchensink.users.rest;
 
-import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,7 +12,7 @@ import jakarta.validation.ValidationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -25,10 +24,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import org.jboss.as.quickstarts.kitchensink.users.dto.MemberTierResponse;
+import org.jboss.as.quickstarts.kitchensink.users.dto.SpendIncrementRequest;
 import org.jboss.as.quickstarts.kitchensink.users.exception.MemberNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.users.model.Member;
 import org.jboss.as.quickstarts.kitchensink.users.repository.MemberRepository;
 import org.jboss.as.quickstarts.kitchensink.users.service.MemberRegistration;
+import org.jboss.as.quickstarts.kitchensink.users.service.MemberSpendService;
 
 /**
  * REST web edge for users-service member management.
@@ -50,11 +51,15 @@ public class MemberResourceRESTService {
 
     private final MemberRepository memberRepository;
     private final MemberRegistration registration;
+    private final MemberSpendService memberSpendService;
 
     // Constructor injection (single constructor -> no @Autowired required).
-    public MemberResourceRESTService(MemberRepository memberRepository, MemberRegistration registration) {
+    public MemberResourceRESTService(MemberRepository memberRepository,
+                                     MemberRegistration registration,
+                                     MemberSpendService memberSpendService) {
         this.memberRepository = memberRepository;
         this.registration = registration;
+        this.memberSpendService = memberSpendService;
     }
 
     /** GET /api/members - list all members ordered by name. */
@@ -103,27 +108,29 @@ public class MemberResourceRESTService {
 
     /**
      * GAP-3 (cross-domain spend increment): POST /api/members/{id}/spend with body
-     * {@code {"amount":<number>}}.
+     * {@code {"orderId":<number>,"amount":<positive-number>}}.
      *
-     * <p>Cross-domain decision: orders-service invokes this endpoint AFTER its order transaction
-     * commits (post-commit, eventually consistent) because users-service owns the {@code member}
-     * table and orders-service must never write it directly. The increment runs inside this
-     * controller's own local {@code @Transactional} boundary; the nightly tier recalculation
-     * reconciles spend from confirmed-order history as a backstop. Unknown member id -> 404.</p>
+     * <p><b>Access control.</b> This is an INTERNAL, data-mutating endpoint: it is guarded by
+     * {@code InternalServiceAuthInterceptor} ({@code /api/members/*&#47;spend}), so callers must
+     * present a valid {@code X-Internal-Service-Token} or receive 401. Only trusted peer services
+     * (orders-service) hold the token; this closes the previously unauthenticated spend-tampering
+     * hole.</p>
+     *
+     * <p><b>Validation.</b> The body is bound to a {@code @Valid} {@link SpendIncrementRequest}, so a
+     * missing/non-positive {@code amount} or a missing {@code orderId} is rejected with 400
+     * (via {@link #handleValidationErrors} / {@link #handleUnreadableBody}) before any mutation.</p>
+     *
+     * <p><b>Idempotency &amp; cross-domain ordering.</b> orders-service invokes this AFTER its order
+     * transaction commits (post-commit, eventually consistent) because users-service owns the
+     * {@code member} table. {@link MemberSpendService} applies each {@code orderId} at most once, so a
+     * retried/duplicated post-commit call is harmless. Unknown member id -> 404.</p>
      */
     @PostMapping("/{id}/spend")
-    @Transactional
     public ResponseEntity<Void> incrementMemberSpend(@PathVariable Long id,
-                                                     @RequestBody Map<String, BigDecimal> body) {
-        Member member = memberRepository.findById(id)
-                .orElseThrow(() -> new MemberNotFoundException("Member not found: " + id));
-        BigDecimal amount = (body != null) ? body.get("amount") : null;
-        if (amount == null) {
-            amount = BigDecimal.ZERO;
-        }
-        BigDecimal current = (member.getTotalSpend() != null) ? member.getTotalSpend() : BigDecimal.ZERO;
-        member.setTotalSpend(current.add(amount));
-        memberRepository.save(member);
+                                                     @Valid @RequestBody SpendIncrementRequest request) {
+        // Delegated to the @Transactional, idempotent service (which owns the transaction boundary and
+        // the orderId-keyed dedupe). Unknown member -> MemberNotFoundException -> 404.
+        memberSpendService.applySpendIncrement(id, request.getOrderId(), request.getAmount());
         return ResponseEntity.ok().build();
     }
 
@@ -138,13 +145,28 @@ public class MemberResourceRESTService {
 
     // --- Exception handlers: preserve the legacy 400 (validation) and 409 (duplicate email) semantics ---
 
-    /** Bean Validation failures on the {@code @Valid @RequestBody} create -> 400 with a field -> message map. */
+    /**
+     * Bean Validation failures on a {@code @Valid @RequestBody} (member create OR
+     * {@link SpendIncrementRequest}) -> 400 with a field -> message map.
+     */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, String>> handleValidationErrors(MethodArgumentNotValidException ex) {
         Map<String, String> errors = new HashMap<>();
         for (FieldError fieldError : ex.getBindingResult().getFieldErrors()) {
             errors.put(fieldError.getField(), fieldError.getDefaultMessage());
         }
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errors);
+    }
+
+    /**
+     * Missing or malformed request body (e.g. a non-numeric {@code amount}/{@code orderId} on the
+     * spend endpoint, or an absent body) -> 400 instead of a 500. Mirrors the explicit 400 mapping on
+     * the orders-service edge so malformed cross-service payloads fail cleanly.
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, String>> handleUnreadableBody(HttpMessageNotReadableException ex) {
+        Map<String, String> errors = new HashMap<>();
+        errors.put("body", "Request body is missing or malformed");
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errors);
     }
 

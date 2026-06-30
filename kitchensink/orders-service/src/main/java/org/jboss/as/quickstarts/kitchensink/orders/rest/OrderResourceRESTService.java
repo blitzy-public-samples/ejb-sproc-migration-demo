@@ -2,10 +2,14 @@ package org.jboss.as.quickstarts.kitchensink.orders.rest;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -14,6 +18,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.validation.Valid;
+
+import org.jboss.as.quickstarts.kitchensink.orders.dto.AddToCartRequest;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.service.OrderService;
 
@@ -35,23 +42,20 @@ public class OrderResourceRESTService {
 
     /**
      * POST /api/orders/cart/{memberId} - add a product to the member's draft cart.
-     * Body: { "productId": N, "quantity": N }. 201 on success; 400 on missing body/keys or qty <= 0.
-     * @RequestBody(required = false) keeps the explicit null-body check (and its exact 400 message)
-     * authoritative, preserving the legacy JAX-RS behavior.
+     * Body: { "productId": N, "quantity": N }. 201 on success; 400 on a missing/malformed body or an
+     * invalid field.
+     *
+     * <p>The body is bound to a typed, {@code @Valid}-checked {@link AddToCartRequest} DTO. This
+     * removes the previous raw-{@code Map} blind casts that turned malformed JSON (e.g. string
+     * values) into a {@code ClassCastException} -> HTTP 500. Now: a missing/unparseable body is a
+     * {@code HttpMessageNotReadableException} (400) and a null/non-positive field is a
+     * {@code MethodArgumentNotValidException} (400) -- both handled below.</p>
      */
     @PostMapping("/cart/{memberId}")
     public ResponseEntity<Object> addToCart(
             @PathVariable Long memberId,
-            @RequestBody(required = false) Map<String, Object> body) {
-        if (body == null || !body.containsKey("productId") || !body.containsKey("quantity")) {
-            return ResponseEntity.badRequest().body("Request body must contain productId and quantity");
-        }
-        Long productId = ((Number) body.get("productId")).longValue();
-        int quantity = ((Number) body.get("quantity")).intValue();
-        if (quantity <= 0) {
-            return ResponseEntity.badRequest().body("quantity must be greater than zero");
-        }
-        orderService.addToCart(memberId, productId, quantity);
+            @Valid @RequestBody AddToCartRequest request) {
+        orderService.addToCart(memberId, request.getProductId(), request.getQuantity());
         return ResponseEntity.status(HttpStatus.CREATED).body("Item added to cart");
     }
 
@@ -104,5 +108,30 @@ public class OrderResourceRESTService {
     @GetMapping("/member/{memberId}")
     public List<Order> getOrderHistory(@PathVariable Long memberId) {
         return orderService.getOrderHistory(memberId);
+    }
+
+    // ----- input-validation error handling (clean 400s, never a 500) -----
+
+    /**
+     * Bean Validation failure on a request body (e.g. {@link AddToCartRequest} with a null or
+     * non-positive field) -> 400 with a concise field-error summary.
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<Object> handleValidation(MethodArgumentNotValidException ex) {
+        String message = ex.getBindingResult().getFieldErrors().stream()
+                .map(fe -> fe.getField() + " " + fe.getDefaultMessage())
+                .collect(Collectors.joining("; "));
+        return ResponseEntity.badRequest()
+                .body(message.isBlank() ? "Request validation failed" : message);
+    }
+
+    /**
+     * Missing or malformed request body (e.g. non-numeric productId/quantity, or absent body) ->
+     * 400 instead of the former {@code ClassCastException}-driven 500.
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Object> handleUnreadableBody(HttpMessageNotReadableException ex) {
+        return ResponseEntity.badRequest()
+                .body("Request body is missing or malformed; productId and quantity must be numbers");
     }
 }

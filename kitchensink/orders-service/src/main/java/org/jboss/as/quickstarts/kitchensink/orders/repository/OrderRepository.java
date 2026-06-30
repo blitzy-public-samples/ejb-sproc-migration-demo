@@ -9,5 +9,12 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
 
     List<Order> findByMemberIdOrderByCreatedAtDesc(Long memberId);
 
-    List<Order> findByMemberIdAndStatusAndCreatedAtAfter(Long memberId, String status, LocalDateTime cutoff);
+    /**
+     * CONFIRMED orders for a member at or after the given cutoff. The comparison is INCLUSIVE
+     * ({@code created_at >= cutoff}) to match the stored-procedure / AAP spend window
+     * ({@code created_at >= NOW() - INTERVAL '90 days'}, db/02_stored_procedures.sql): an order
+     * placed exactly at the boundary instant must still be counted. (The earlier
+     * {@code ...CreatedAtAfter} form was strict {@code >} and incorrectly excluded the boundary.)
+     */
+    List<Order> findByMemberIdAndStatusAndCreatedAtGreaterThanEqual(Long memberId, String status, LocalDateTime cutoff);
 }
