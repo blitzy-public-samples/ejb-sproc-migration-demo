@@ -97,6 +97,26 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+            <!--
+                Runs the migrated *IT integration tests (e.g. TierRecalculationIT) during the
+                integration-test/verify phases of `mvn verify`. The Surefire convention (Test*/*Test)
+                deliberately excludes the *IT classes, so without this binding the carried-forward
+                Arquillian->Spring Boot ITs would never execute. The CI workflow (.github/workflows/ci.yml)
+                runs `mvn -B clean verify` and collects target/failsafe-reports, which this plugin produces.
+                Version is managed by the Spring Boot parent BOM (no hand-pinned version).
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>

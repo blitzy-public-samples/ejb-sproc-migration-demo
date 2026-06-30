@@ -144,6 +144,23 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+
+            <!--
+                Activates the integration-test carry-forward (AAP §0.6, G6). The migrated
+                tests follow the Failsafe *IT naming convention (DiscountServiceIT,
+                OrderServiceIT, ...) and rely on a real Testcontainers PostgreSQL plus
+                MockRestServiceServer stubs, so they MUST run in the Failsafe-driven
+                integration-test/verify phases rather than the Surefire test phase.
+
+                The Spring Boot parent already supplies the plugin VERSION and the managed
+                integration-test/verify executions via <pluginManagement>; simply declaring the
+                plugin here (no extra <executions> needed) attaches those managed goals to the
+                build lifecycle, so `mvn -B clean verify` executes the *IT tests exactly once.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+            </plugin>
         </plugins>
     </build>
 </project>

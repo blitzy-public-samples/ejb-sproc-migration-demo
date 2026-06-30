@@ -112,7 +112,7 @@ curl http://localhost:8083/users/actuator/health
 # each responds with: {"status":"UP"}
 ----
 
-Beyond the health endpoint, each service's REST surface is being migrated from the original monolith. Once the per-service REST controllers are in place, the original REST endpoints are preserved, each under its service's base mapping. The target calls will be:
+The original REST endpoints are preserved, each under its service's base mapping. Example calls:
 
 [source,bash]
 ----
@@ -129,29 +129,19 @@ curl -X POST http://localhost:8083/users/api/members \
      -d '{"name":"Jane Doe","email":"jane.doe@example.com","phoneNumber":"2125551234"}'
 ----
 
-[NOTE]
-====
-The REST controllers that expose these endpoints are part of the in-progress service migration and are not yet available; the calls above describe the *target* REST surface. Only the Actuator health endpoints shown above are live at this stage.
-====
-
 == Running the integration tests
 
-Once migrated, the integration tests run via `mvn -B clean verify` (from inside `kitchensink/`). They will be `@SpringBootTest` tests backed by a Testcontainers-managed PostgreSQL instance — no application server is required. The Testcontainers database is initialized from `db/01_schema.sql` and `db/03_seed_data.sql` only; downstream HTTP dependencies are stubbed in-process, so the tests run without the peer services running. The tests will be distributed to their owning services:
+`mvn -B clean verify` (run from inside `kitchensink/`) executes the migrated integration tests. They are `@SpringBootTest` tests backed by a Testcontainers-managed PostgreSQL instance — no application server is required. The Testcontainers database is initialized from `db/01_schema.sql` and `db/03_seed_data.sql` only; downstream HTTP dependencies are stubbed in-process, so the tests run without the peer services running. The tests are distributed to their owning services:
 
 * *marketplace-service* — `PricingServiceIT`
 * *orders-service* — `DiscountServiceIT`, `OrderServiceIT`
 * *users-service* — `MemberRegistrationIT`, `RemoteMemberRegistrationIT`, `TierRecalculationIT`
 
-[NOTE]
-====
-The `@SpringBootTest` integration tests listed here are part of the in-progress migration and are not yet present in the modules; this section describes the *target* test layout.
-====
-
 The repository-root workflow `.github/workflows/ci.yml` runs the same `mvn -B clean verify` on a Docker-enabled runner for every push and pull request.
 
 == Container images
 
-Each service is packaged as a container image through a multi-stage `Dockerfile` (a `maven:3.9-eclipse-temurin-17` build stage that produces the fat JAR, and an `eclipse-temurin:17-jre-alpine` runtime stage). All three services — `marketplace-service`, `orders-service`, and `users-service` — provide a Dockerfile. Build and run an image as follows (shown for `marketplace-service`; repeat for the others, mapping ports `8082` and `8083`):
+Each service ships a multi-stage `Dockerfile` (a `maven:3.9-eclipse-temurin-17` build stage that produces the fat JAR, and an `eclipse-temurin:17-jre-alpine` runtime stage). Build and run an image as follows (shown for `marketplace-service`; repeat for the others, mapping ports `8082` and `8083`):
 
 [source,bash]
 ----
@@ -166,4 +156,4 @@ The container image build skips the integration tests (they require a Docker dae
 
 == A note on the former web UI
 
-The legacy JSF member-registration UI was removed together with the original WAR packaging. The equivalent functionality will be available through the users-service REST endpoint (`POST http://localhost:8083/users/api/members`) once that controller is migrated. The PHP storefront under `frontend/` is retained and integrates with the three services purely over HTTP, using the per-service base URLs configured in `frontend/includes/config.php`.
+The legacy JSF member-registration UI was removed together with the original WAR packaging. The equivalent functionality is now available through the users-service REST endpoint (`POST http://localhost:8083/users/api/members`). The PHP storefront under `frontend/` is retained and integrates with the three services purely over HTTP, using the per-service base URLs configured in `frontend/includes/config.php`.
