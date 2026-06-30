@@ -24,23 +24,45 @@ public interface MarketplaceClient {
 
     /**
      * Selects the best vendor for a product at a given quantity by reading the marketplace
-     * vendor-ranking endpoint
-     * ({@code GET {marketplace.base-url}/api/products/{productId}/vendors?qty=}) and returning
-     * the top-ranked vendor's id.
+     * AUTHORITATIVE best-vendor endpoint
+     * ({@code GET {marketplace.base-url}/api/products/{productId}/best-vendor?qty=}) and returning
+     * the chosen vendor's id.
      *
-     * <p>The ranking/scoring (the migrated {@code select_best_vendor} Source A logic, AAP
-     * &sect;0.6.1) is owned by marketplace-service; this thin gateway does NOT re-rank — it
-     * trusts the order returned by marketplace and takes the first entry.</p>
+     * <p>The selection (the migrated {@code select_best_vendor} Source-A MAXIMIZATION logic, AAP
+     * &sect;0.6.1) is owned by marketplace-service; this thin gateway does NOT re-rank. It consumes the
+     * dedicated {@code /best-vendor} endpoint — which returns the single Source-A-maximized vendor as
+     * {@code {"vendorId": N}} — rather than inferring "best" from the price-sorted catalog listing
+     * (review findings C1/C2/C3): consuming the catalog list would have made orders-service silently
+     * pick the cheapest vendor instead of the Source-A best one.</p>
      *
      * @param productId the product identifier
      * @param qty       the requested quantity (affects vendor eligibility / volume tier)
-     * @return the best vendor's id, or {@code null} when marketplace reports no available
-     *         vendor for the product (faithful to the monolith's {@code selectBestVendor}
-     *         returning {@code null}, which makes the caller skip the line item)
+     * @return the Source-A best vendor's id, or {@code null} when marketplace reports no eligible
+     *         vendor for the product/quantity (HTTP 404). Callers MUST treat {@code null} as "no
+     *         eligible vendor" and abort the line rather than silently skipping it (review M1).
      * @throws org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException
      *         if marketplace-service responds with a 5xx status or is unreachable
      */
     Long selectBestVendor(Long productId, int qty);
+
+    /**
+     * Returns the catalog weight (in pounds) of a product by reading the marketplace product
+     * endpoint ({@code GET {marketplace.base-url}/api/products/{productId}}) and projecting its
+     * {@code weightLbs} field.
+     *
+     * <p><strong>Why this exists (review finding C5 — shipping parity).</strong> The monolith's
+     * {@code process_order} accumulated {@code COALESCE(weight_lbs, 0) * quantity} per cart line by
+     * joining the {@code products} table, and shipping is computed from that total weight. orders-service
+     * owns no {@code Product} entity (boundary rule, AAP &sect;0.7.2), so it reads the weight over HTTP
+     * here. The catalog row already exposes {@code weightLbs}, so no new producer endpoint is needed.</p>
+     *
+     * @param productId the product identifier
+     * @return the product's weight in pounds; {@link java.math.BigDecimal#ZERO} when marketplace
+     *         returns 404 or a null weight (faithful to the procedure's {@code COALESCE(weight_lbs, 0)})
+     * @throws org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException
+     *         if marketplace-service responds with a 5xx status or is unreachable
+     */
+    BigDecimal getProductWeight(Long productId);
 
     /**
      * Returns the unit price for a (product, vendor, quantity) combination per Contract 1

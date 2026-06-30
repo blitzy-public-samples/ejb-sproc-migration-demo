@@ -2,6 +2,7 @@ package org.jboss.as.quickstarts.kitchensink.orders.rest;
 
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.NoEligibleVendorException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -81,6 +82,23 @@ public class OrdersRestExceptionHandler {
     @ExceptionHandler(InventoryNotFoundException.class)
     public ResponseEntity<String> handleInventoryNotFound(InventoryNotFoundException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
+    }
+
+    /**
+     * Maps {@link NoEligibleVendorException} (a cart line has no eligible/in-stock vendor at order
+     * orchestration time) to {@code HTTP 409 CONFLICT} (review M1). The request is well-formed but
+     * cannot be fulfilled in the current catalog/inventory state, so it is a conflict with server
+     * state rather than a 400 (bad input) or 404 (missing resource). This handler ensures the order
+     * aborts with a clear status instead of being flattened to a generic {@code 500} by the broad
+     * {@code catch (Exception e)} in {@link OrderResourceRESTService} (those handlers re-throw this
+     * exception ahead of the generic catch so it reaches this advice).
+     *
+     * @param ex the raised domain exception
+     * @return a {@code 409} response whose plain-text body is the exception's detail message
+     */
+    @ExceptionHandler(NoEligibleVendorException.class)
+    public ResponseEntity<String> handleNoEligibleVendor(NoEligibleVendorException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ex.getMessage());
     }
 
     /**

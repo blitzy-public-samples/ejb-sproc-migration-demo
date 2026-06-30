@@ -147,26 +147,13 @@
             </plugin>
 
             <!--
-                Failsafe runs the integration tests (OrderServiceIT, DiscountServiceIT) during
-                the verify phase. Surefire intentionally ignores the *IT naming convention, so
-                this execution — binding the integration-test and verify goals — is required
-                for the integration tests to actually run during `mvn verify` / `mvn install`
-                (and in CI). Plugin version and the classesDirectory setting that lets
-                @SpringBootTest run against compiled classes are inherited from the Spring Boot
-                parent's pluginManagement, so neither is restated here.
+                NOTE: the maven-failsafe-plugin execution (integration-test + verify goals) that
+                runs OrderServiceIT and DiscountServiceIT is now declared ONCE in the aggregator
+                parent (../pom.xml) and inherited by every module, so the formerly duplicated
+                per-child block here has been removed. This keeps Failsafe configuration uniform
+                across marketplace-service, users-service, and orders-service (review finding:
+                "Configure maven-failsafe-plugin in the parent or this child").
             -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-failsafe-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>integration-test</goal>
-                            <goal>verify</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
         </plugins>
     </build>
 </project>

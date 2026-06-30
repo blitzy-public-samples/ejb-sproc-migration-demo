@@ -40,11 +40,11 @@ if (!$product) {
     exit;
 }
 
-// API call: GET /api/products/{id}/vendors?quantity={qty}
-// Returns VendorPriceResult list sorted by unit price ascending
-$vendors = api_get("/products/{$productId}/vendors?quantity={$quantity}") ?? [];
+// API call: GET /api/products/{id}/vendors?qty={qty}
+// Returns VendorPriceResult list ranked by the Source-A score (best vendor first)
+$vendors = api_get("/products/{$productId}/vendors?qty={$quantity}") ?? [];
 
-// API call (if logged in): GET /api/products/{id}/price?vendorId={v}&quantity={qty}
+// API call (if logged in): GET /api/products/{id}/price?vendorId={v}&qty={qty}
 // Used to show personalised pricing — we show it per vendor row instead
 $memberId = get_current_member_id();
 
@@ -91,8 +91,8 @@ require_once __DIR__ . '/includes/header.php';
 <div class="card" style="margin-top:24px;">
     <h3 style="margin-bottom:16px;">
         Vendor Pricing for Qty <?php echo $quantity; ?>
-        <!-- API call: GET /api/products/{id}/vendors?quantity={qty} -->
-        <!-- Returns vendors ranked by price (cheapest first) from VendorSelectionService -->
+        <!-- API call: GET /api/products/{id}/vendors?qty={qty} -->
+        <!-- Returns vendors ranked by the Source-A score (best vendor first) from VendorSelectionService -->
     </h3>
     <?php if (empty($vendors)): ?>
         <p style="color:#888;">No vendor pricing available.</p>

@@ -5,9 +5,12 @@ import java.util.Map;
 
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.NoEligibleVendorException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.service.OrderService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -56,6 +59,14 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/orders")
 public class OrderResourceRESTService {
 
+    /**
+     * Logger for server-side diagnostics. Generic {@code 500} handlers log the full exception (with
+     * stack trace) here and return a constant, sanitized message to the client so that internal
+     * details — SQL, foreign-key violations, type-mismatch traces — are never leaked in the response
+     * body (review M14, CWE-209).
+     */
+    private static final Logger log = LoggerFactory.getLogger(OrderResourceRESTService.class);
+
     private final OrderService orderService;
 
     /**
@@ -74,28 +85,43 @@ public class OrderResourceRESTService {
      * Body: { "productId": N, "quantity": N }
      *
      * <p>Returns {@code 400 BAD_REQUEST} when the body is missing either {@code productId} or
-     * {@code quantity}, or when {@code quantity <= 0}; otherwise persists the draft item and
-     * returns {@code 201 CREATED}.</p>
+     * {@code quantity}, when {@code memberId}/{@code productId} is not positive, or when
+     * {@code quantity <= 0}; otherwise persists the draft item and returns {@code 201 CREATED}.</p>
+     *
+     * <p><strong>Input safety (review MED3, CWE-20).</strong> The body is now bound to the typed
+     * {@link AddToCartRequest} record instead of an untyped {@code Map<String,Object>} that was
+     * cast with unchecked {@code (Number)} casts. With typed binding, a malformed JSON value (e.g. a
+     * non-numeric {@code productId}) is rejected by the message converter as a controlled
+     * {@code 400}/handled error rather than throwing a {@code ClassCastException} that surfaced as a
+     * {@code 500}. Null and positivity are validated explicitly so the monolith's exact 400 message
+     * strings and the {@code 201} success message are preserved verbatim (contract preservation,
+     * AAP &sect;0.7.1).</p>
      *
      * @param memberId the owning member's id (path variable)
-     * @param body     the request payload carrying {@code productId} and {@code quantity}
+     * @param request  the typed request payload carrying {@code productId} and {@code quantity}
      * @return a {@link ResponseEntity} mirroring the monolith's status codes and message strings
      */
     @PostMapping("/cart/{memberId}")
     public ResponseEntity<?> addToCart(
             @PathVariable("memberId") Long memberId,
-            @RequestBody(required = false) Map<String, Object> body) {
-        if (body == null || !body.containsKey("productId") || !body.containsKey("quantity")) {
+            @RequestBody(required = false) AddToCartRequest request) {
+        if (request == null || request.productId() == null || request.quantity() == null) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body("Request body must contain productId and quantity");
         }
-        Long productId = ((Number) body.get("productId")).longValue();
-        int quantity = ((Number) body.get("quantity")).intValue();
-        if (quantity <= 0) {
+        if (memberId == null || memberId <= 0L) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("memberId must be greater than zero");
+        }
+        if (request.productId() <= 0L) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body("productId must be greater than zero");
+        }
+        if (request.quantity() <= 0) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body("quantity must be greater than zero");
         }
-        orderService.addToCart(memberId, productId, quantity);
+        orderService.addToCart(memberId, request.productId(), request.quantity());
         return ResponseEntity.status(HttpStatus.CREATED).body("Item added to cart");
     }
 
@@ -141,14 +167,19 @@ public class OrderResourceRESTService {
         try {
             OrderService.OrderPreview preview = orderService.previewOrder(memberId, zip, expedite);
             return ResponseEntity.ok(preview);
-        } catch (MemberNotFoundException | InventoryNotFoundException | ServiceUnavailableException e) {
-            // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/503,
-            // AAP §0.6.2). Re-throw so OrdersRestExceptionHandler (@RestControllerAdvice) maps them,
-            // rather than letting the generic catch below flatten them to 500 (QA INC-2 Finding F1).
+        } catch (MemberNotFoundException | InventoryNotFoundException
+                 | NoEligibleVendorException | ServiceUnavailableException e) {
+            // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/409/503,
+            // AAP §0.6.2; NoEligibleVendorException -> 409 per review M1). Re-throw so
+            // OrdersRestExceptionHandler (@RestControllerAdvice) maps them, rather than letting the
+            // generic catch below flatten them to 500 (QA INC-2 Finding F1).
             throw e;
         } catch (Exception e) {
+            // Sanitized 500 (review M14, CWE-209): log the full detail server-side, return a constant
+            // message so internal details (SQL, FK, type-mismatch traces) are never leaked to clients.
+            log.error("Failed to preview order for member {}", memberId, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body("Could not preview order: " + e.getMessage());
+                .body("Could not preview order");
         }
     }
 
@@ -174,14 +205,19 @@ public class OrderResourceRESTService {
         try {
             Long orderId = orderService.submitOrder(memberId, zip, expedite);
             return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("orderId", orderId));
-        } catch (MemberNotFoundException | InventoryNotFoundException | ServiceUnavailableException e) {
-            // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/503,
-            // AAP §0.6.2). Re-throw so OrdersRestExceptionHandler (@RestControllerAdvice) maps them,
-            // rather than letting the generic catch below flatten them to 500 (QA INC-2 Finding F1).
+        } catch (MemberNotFoundException | InventoryNotFoundException
+                 | NoEligibleVendorException | ServiceUnavailableException e) {
+            // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/409/503,
+            // AAP §0.6.2; NoEligibleVendorException -> 409 per review M1). Re-throw so
+            // OrdersRestExceptionHandler (@RestControllerAdvice) maps them, rather than letting the
+            // generic catch below flatten them to 500 (QA INC-2 Finding F1).
             throw e;
         } catch (Exception e) {
+            // Sanitized 500 (review M14, CWE-209): log the full detail server-side, return a constant
+            // message so internal details (SQL, FK, type-mismatch traces) are never leaked to clients.
+            log.error("Failed to submit order for member {}", memberId, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body("Could not submit order: " + e.getMessage());
+                .body("Could not submit order");
         }
     }
 
@@ -213,5 +249,24 @@ public class OrderResourceRESTService {
     public ResponseEntity<?> getOrderHistory(@PathVariable("memberId") Long memberId) {
         List<Order> orders = orderService.getOrderHistory(memberId);
         return ResponseEntity.ok(orders);
+    }
+
+    /**
+     * Typed request body for {@link #addToCart(Long, AddToCartRequest)} (review MED3, CWE-20).
+     *
+     * <p>Replaces the previous untyped {@code Map<String,Object>} body whose values were read with
+     * unchecked {@code (Number)} casts. Binding to this record makes Jackson coerce {@code productId}
+     * and {@code quantity} to their declared types during deserialization, so a malformed value (for
+     * example a non-numeric string) is reported as a controlled {@code 400}/handled message-conversion
+     * error rather than throwing a {@code ClassCastException} that previously surfaced as an opaque
+     * {@code 500}. The fields are reference types ({@link Long}/{@link Integer}) so a missing field
+     * binds to {@code null} and is rejected by the handler with the monolith's exact
+     * {@code "Request body must contain productId and quantity"} message (contract preservation,
+     * AAP &sect;0.7.1); positivity is likewise validated explicitly in the handler.</p>
+     *
+     * @param productId the product to add to the cart
+     * @param quantity  the quantity to add
+     */
+    public record AddToCartRequest(Long productId, Integer quantity) {
     }
 }

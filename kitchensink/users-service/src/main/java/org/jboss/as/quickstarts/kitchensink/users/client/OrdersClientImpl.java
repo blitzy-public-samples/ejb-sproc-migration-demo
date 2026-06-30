@@ -52,24 +52,40 @@ public class OrdersClientImpl implements OrdersClient {
      */
     private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
 
+    /** Header carrying the shared service-to-service secret for orders-service {@code /internal/**}. */
+    private static final String API_KEY_HEADER = "X-Internal-Api-Key";
+
     private final RestClient restClient;
 
     /**
-     * @param ordersBaseUrl base URL of orders-service including its {@code /orders}
-     *                      context-path, e.g. {@code http://localhost:8082/orders}
-     *                      (property {@code orders.base-url}).
+     * @param ordersBaseUrl  base URL of orders-service including its {@code /orders}
+     *                       context-path, e.g. {@code http://localhost:8082/orders}
+     *                       (property {@code orders.base-url}).
+     * @param internalApiKey shared service-to-service secret (property {@code internal.api-key},
+     *                       sourced from {@code INTERNAL_API_KEY}). Sent as the
+     *                       {@code X-Internal-Api-Key} header so orders-service's
+     *                       {@code InternalApiKeyFilter} authorizes the Contract 3 spend read.
+     *                       When blank (e.g. in tests, where this client is mocked) no header is
+     *                       attached.
      */
-    public OrdersClientImpl(@Value("${orders.base-url}") String ordersBaseUrl) {
+    public OrdersClientImpl(@Value("${orders.base-url}") String ordersBaseUrl,
+                            @Value("${internal.api-key:}") String internalApiKey) {
         // Configure explicit connect/read timeouts on the underlying request factory so a slow or
         // unreachable orders-service fails fast rather than hanging the tier-recalculation scheduler
         // threads and exhausting resources. No retry/cache/circuit-breaker is added (minimal-change).
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(CONNECT_TIMEOUT);
         requestFactory.setReadTimeout(READ_TIMEOUT);
-        this.restClient = RestClient.builder()
+        RestClient.Builder builder = RestClient.builder()
                 .baseUrl(ordersBaseUrl)
-                .requestFactory(requestFactory)
-                .build();
+                .requestFactory(requestFactory);
+        // orders-service guards /internal/** with a fail-closed shared-secret filter; attach the key
+        // as a default header so every Contract 3 spend read is authenticated. Only add it when
+        // configured to avoid sending an empty header.
+        if (internalApiKey != null && !internalApiKey.isBlank()) {
+            builder.defaultHeader(API_KEY_HEADER, internalApiKey);
+        }
+        this.restClient = builder.build();
     }
 
     @Override

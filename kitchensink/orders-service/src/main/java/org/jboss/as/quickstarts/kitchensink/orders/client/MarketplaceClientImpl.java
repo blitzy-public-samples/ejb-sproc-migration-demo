@@ -3,11 +3,9 @@ package org.jboss.as.quickstarts.kitchensink.orders.client;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.math.BigDecimal;
 import java.time.Duration;
-import java.util.List;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -58,15 +56,20 @@ public class MarketplaceClientImpl implements MarketplaceClient {
     @Override
     public Long selectBestVendor(Long productId, int qty) {
         try {
-            List<VendorOption> vendors = restClient.get()
-                    .uri("/api/products/{productId}/vendors?qty={qty}", productId, qty)
+            // Consume the AUTHORITATIVE Source-A best-vendor endpoint (review C1/C2/C3). It returns the
+            // single Source-A-maximized vendor as {"vendorId": N}; we do NOT infer "best" from the
+            // price-sorted catalog list (which would silently pick the cheapest vendor).
+            BestVendorOption best = restClient.get()
+                    .uri("/api/products/{productId}/best-vendor?qty={qty}", productId, qty)
                     .retrieve()
-                    .body(new ParameterizedTypeReference<List<VendorOption>>() {});
-            if (vendors == null || vendors.isEmpty()) {
+                    .body(BestVendorOption.class);
+            if (best == null) {
                 return null;
             }
-            return vendors.get(0).vendorId();
+            return best.vendorId();
         } catch (HttpClientErrorException.NotFound e) {
+            // 404 -> no eligible vendor for this product/qty. Return null; the caller (OrderService)
+            // converts a null selection into a NoEligibleVendorException rather than skipping the line.
             return null;
         } catch (HttpServerErrorException e) {
             throw new ServiceUnavailableException(
@@ -74,6 +77,32 @@ public class MarketplaceClientImpl implements MarketplaceClient {
         } catch (RestClientException e) {
             throw new ServiceUnavailableException(
                     "marketplace-service is unavailable selecting a vendor for product " + productId, e);
+        }
+    }
+
+    @Override
+    public BigDecimal getProductWeight(Long productId) {
+        try {
+            // Read the catalog row and project its weightLbs field (review C5). The catalog already
+            // exposes weight, so no new marketplace producer endpoint is required.
+            ProductWeightOption product = restClient.get()
+                    .uri("/api/products/{productId}", productId)
+                    .retrieve()
+                    .body(ProductWeightOption.class);
+            if (product == null || product.weightLbs() == null) {
+                // Faithful to process_order's COALESCE(weight_lbs, 0): an absent/null weight is 0.
+                return BigDecimal.ZERO;
+            }
+            return product.weightLbs();
+        } catch (HttpClientErrorException.NotFound e) {
+            // 404 -> product not found in the catalog -> treat its weight as 0 (COALESCE(weight_lbs, 0)).
+            return BigDecimal.ZERO;
+        } catch (HttpServerErrorException e) {
+            throw new ServiceUnavailableException(
+                    "marketplace-service returned an error reading the weight of product " + productId);
+        } catch (RestClientException e) {
+            throw new ServiceUnavailableException(
+                    "marketplace-service is unavailable reading the weight of product " + productId, e);
         }
     }
 
@@ -97,13 +126,24 @@ public class MarketplaceClientImpl implements MarketplaceClient {
     }
 
     /**
-     * Minimal projection of a single entry in the marketplace vendor-ranking response. The
-     * marketplace endpoint returns a JSON array of ranked vendor objects (vendorId, vendorName,
-     * unitPrice, fulfillmentRating, avgShippingDays); orders-service only needs the id of the
-     * top-ranked entry, so all other properties are ignored. Declared as a private nested type
-     * to avoid creating a shared cross-service DTO (boundary rule).
+     * Minimal projection of the marketplace best-vendor response. The {@code /best-vendor} endpoint
+     * returns the single Source-A-maximized vendor as {@code {"vendorId": N}}; orders-service needs
+     * only that id. Declared as a private nested type to avoid creating a shared cross-service DTO
+     * (boundary rule, AAP &sect;0.7.2); tolerant of unknown properties so an additive producer change
+     * cannot break the read.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    private record VendorOption(Long vendorId) {
+    private record BestVendorOption(Long vendorId) {
+    }
+
+    /**
+     * Minimal projection of the marketplace product (catalog) response. The {@code /api/products/{id}}
+     * endpoint returns the full product object (id, name, sku, basePrice, weightLbs, category, ...);
+     * orders-service needs only {@code weightLbs} to accumulate cart weight for shipping (review C5).
+     * Declared as a private nested type to avoid a shared cross-service DTO (boundary rule); tolerant
+     * of unknown properties so the rest of the catalog payload is ignored.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record ProductWeightOption(BigDecimal weightLbs) {
     }
 }

@@ -3,6 +3,7 @@ package org.jboss.as.quickstarts.kitchensink.marketplace.rest;
 import java.math.BigDecimal;
 import java.util.List;
 
+import org.jboss.as.quickstarts.kitchensink.marketplace.dto.BestVendorResponse;
 import org.jboss.as.quickstarts.kitchensink.marketplace.model.Product;
 import org.jboss.as.quickstarts.kitchensink.marketplace.repository.ProductRepository;
 import org.jboss.as.quickstarts.kitchensink.marketplace.service.PricingService;
@@ -78,18 +79,50 @@ public class ProductResourceRESTService {
 
     /**
      * GET /api/products/{id}/vendors?qty=N
-     * Returns a ranked vendor list for a product at a given qty.
+     * Returns a vendor list for a product at a given qty, ranked by the Source-A score
+     * (best vendor first) so the top entry matches the order-time selection (review C1).
+     * Returns 400 when {@code qty < 1} and 404 when the product does not exist.
      */
     @GetMapping("/{id}/vendors")
     public ResponseEntity<List<VendorSelectionService.VendorPriceResult>> getVendorsForProduct(
             @PathVariable("id") Long id,
             @RequestParam(name = "qty", defaultValue = "1") int qty) {
+        requireValidQty(qty);
         if (productRepository.findById(id).isEmpty()) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Product not found: " + id);
         }
         List<VendorSelectionService.VendorPriceResult> vendors =
                 vendorSelectionService.getVendorPricesForProduct(id, qty);
         return ResponseEntity.ok(vendors);
+    }
+
+    /**
+     * GET /api/products/{id}/best-vendor?qty=N
+     *
+     * <p>Authoritative Source-A best-vendor selection endpoint (review findings C1/C2/C3). Delegates
+     * to {@link VendorSelectionService#selectBestVendor(Long, int)} — the MAXIMIZATION scoring path
+     * (AAP &sect;0.6.1) — and returns {@link BestVendorResponse} ({@code {"vendorId": N}}). This is the
+     * endpoint orders-service consumes for vendor selection; it deliberately does NOT infer "best"
+     * from the price-sorted catalog listing.</p>
+     *
+     * <p>Returns 400 when {@code qty < 1}, and 404 when the product does not exist OR no vendor can
+     * satisfy the request (no eligible/in-stock vendor), so the consumer never silently treats a
+     * missing selection as a valid vendor.</p>
+     */
+    @GetMapping("/{id}/best-vendor")
+    public ResponseEntity<BestVendorResponse> getBestVendorForProduct(
+            @PathVariable("id") Long id,
+            @RequestParam(name = "qty", defaultValue = "1") int qty) {
+        requireValidQty(qty);
+        if (productRepository.findById(id).isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Product not found: " + id);
+        }
+        Long vendorId = vendorSelectionService.selectBestVendor(id, qty);
+        if (vendorId == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND, "No eligible vendor for product " + id + " at qty " + qty);
+        }
+        return ResponseEntity.ok(new BestVendorResponse(vendorId));
     }
 
     /**
@@ -103,11 +136,27 @@ public class ProductResourceRESTService {
             @PathVariable("id") Long id,
             @RequestParam(name = "vendorId", required = false) Long vendorId,
             @RequestParam(name = "qty", defaultValue = "1") int qty) {
+        requireValidQty(qty);
         if (vendorId == null) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "vendorId query parameter is required");
         }
         BigDecimal unitPrice = pricingService.calculatePrice(id, vendorId, qty);
         return ResponseEntity.ok(unitPrice);
+    }
+
+    /**
+     * Validates the {@code qty} query parameter for the pricing/vendor endpoints (review MED1).
+     * Quantity drives the volume-discount tier and vendor eligibility, so a zero or negative value
+     * is rejected with HTTP 400 rather than silently altering pricing behavior.
+     *
+     * @param qty the requested quantity
+     * @throws ResponseStatusException 400 BAD_REQUEST when {@code qty < 1}
+     */
+    private static void requireValidQty(int qty) {
+        if (qty < 1) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "qty must be greater than or equal to 1");
+        }
     }
 }

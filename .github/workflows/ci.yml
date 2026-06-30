@@ -31,19 +31,23 @@ jobs:
     name: Build, integration-test, and e2e
     runs-on: ubuntu-latest
 
-    # Database credentials are sourced from GitHub Actions secrets (CWE-798: no
-    # hardcoded credentials in the workflow). When a secret is unset, the
-    # `|| '<default>'` fallback supplies the value the disposable CI postgres
-    # service container uses, so the workflow stays runnable out-of-the-box while
-    # allowing a real deployment to override each value via repository/environment
-    # secrets. These job-level env vars are the SINGLE credential source: they
-    # propagate to every `run:` step shell below. The service-container block
-    # re-references the same secrets directly because a service `env:` is
-    # evaluated independently of the job `env` context.
+    # Credentials for the EPHEMERAL postgres:16 service container below (and for
+    # the three live services that connect to it during the e2e phase). This
+    # database is created fresh for every CI run, holds only the public db/*.sql
+    # seed fixtures, is never reachable outside the job, and never contains
+    # production data. These are therefore DELIBERATELY NON-SECRET, CI-ONLY
+    # constants — NOT a production fallback. The previous
+    # `secrets.* || '<default>'` pattern was removed because defaulting a "secret"
+    # to a committed literal implies a production credential is being supplied
+    # here (CWE-798); a real deployment instead provides its own datasource
+    # credentials via deployment secrets, which is outside this CI workflow's
+    # scope. These job-level vars propagate to every `run:` step shell below; the
+    # service container re-declares the same literals because a service `env:`
+    # cannot read the job `env` context.
     env:
-      POSTGRES_DB: ${{ secrets.POSTGRES_DB || 'kitchensink' }}
-      POSTGRES_USER: ${{ secrets.POSTGRES_USER || 'postgres' }}
-      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'postgres' }}
+      POSTGRES_DB: kitchensink
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_ephemeral_password
 
     # PostgreSQL backing the THREE LIVE services during the e2e phase. The
     # @SpringBootTest + Testcontainers integration tests that run earlier (inside
@@ -52,10 +56,13 @@ jobs:
     services:
       postgres:
         image: postgres:16
+        # Same ephemeral CI-only credentials as the job env above (a service
+        # `env:` cannot reference the job `env` context, so the literals are
+        # repeated here rather than defaulted from secrets).
         env:
-          POSTGRES_DB: ${{ secrets.POSTGRES_DB || 'kitchensink' }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER || 'postgres' }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'postgres' }}
+          POSTGRES_DB: kitchensink
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_ephemeral_password
         ports:
           - 5432:5432
         # Hold the job until the database is accepting connections.
@@ -81,11 +88,15 @@ jobs:
       # A single Maven invocation against the aggregator POM (packaging=pom)
       # compiles, runs the Testcontainers integration tests for, and (via
       # spring-boot-maven-plugin) repackages all three services into
-      # kitchensink/<module>/target/<module>-8.0.0.GA.jar. The parity
-      # conformance checks (pricing 9.1692 @ qty1 and 7.7938 @ qty100;
-      # member.total_spend incremented by the order subtotal; one discount_audit
-      # row per discount call) are enforced purely by these tests passing — no
-      # bespoke assertions belong in this YAML.
+      # kitchensink/<module>/target/<module>-8.0.0.GA.jar. The parent POM binds
+      # maven-failsafe-plugin, so every *IT across all three modules runs during
+      # `install`. The parity conformance checks (pricing 9.1692 @ qty1 and
+      # 7.7938 @ qty100; member.total_spend incremented by the order SUBTOTAL —
+      # performed by orders-service via the boundary-safe orders -> users
+      # total-spend HTTP write contract and asserted in OrderServiceIT by
+      # verifying that write; one discount_audit row per discount call) are
+      # enforced purely by these tests passing — no bespoke assertions belong in
+      # this YAML.
       - name: Build and run integration tests (all modules)
         run: mvn -B -ntp -f kitchensink/pom.xml clean install
 
@@ -116,26 +127,36 @@ jobs:
       # users fires an ApplicationReadyEvent tier recalculation that calls
       # orders-service over HTTP.
       - name: Start services
-        # Datasource credentials are derived from the job-level env (sourced from
-        # secrets) and exported INSIDE this step only, so the earlier Maven /
-        # Testcontainers build never sees SPRING_DATASOURCE_* (its
-        # @DynamicPropertySource ephemeral DB stays authoritative). The exec'd
-        # JVMs inherit the exported vars; nothing is echoed to the log.
+        # Datasource credentials come from the job-level env (the ephemeral
+        # CI-only literals) and are exported INSIDE this step only, so the earlier
+        # Maven / Testcontainers build never sees SPRING_DATASOURCE_* (its
+        # @DynamicPropertySource ephemeral DB stays authoritative). INTERNAL_API_KEY
+        # is the shared service-to-service key guarding the /internal/** endpoints:
+        # orders-service and users-service must present the SAME value (as the
+        # X-Internal-Api-Key header) for their mutual /internal calls to
+        # authenticate — users' startup tier recalculation reads orders'
+        # /internal spend, and an order submit writes the subtotal back to users'
+        # /internal total-spend. It is an ephemeral CI-only value exported only
+        # here, so the earlier test build still resolves `internal.api-key` empty.
+        # The exec'd JVMs inherit the exported vars; nothing is echoed to the log.
         run: |
           export SPRING_DATASOURCE_URL="jdbc:postgresql://localhost:5432/${POSTGRES_DB}"
           export SPRING_DATASOURCE_USERNAME="$POSTGRES_USER"
           export SPRING_DATASOURCE_PASSWORD="$POSTGRES_PASSWORD"
+          export INTERNAL_API_KEY="ci-internal-ephemeral-key"
           java -jar kitchensink/marketplace-service/target/*.jar > marketplace.log 2>&1 &
           java -jar kitchensink/orders-service/target/*.jar      > orders.log      2>&1 &
           java -jar kitchensink/users-service/target/*.jar       > users.log       2>&1 &
 
-      # Node 20 for the Playwright e2e project. No npm cache is configured: the
-      # e2e project commits no package-lock.json, and setup-node errors when
-      # `cache: npm` is set without a lockfile.
+      # Node 20 for the Playwright e2e project. The e2e project now commits a
+      # package-lock.json, so npm dependency caching is keyed off it (the lockfile
+      # lives under kitchensink/e2e, not the repo root, hence cache-dependency-path).
       - name: Set up Node 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: npm
+          cache-dependency-path: kitchensink/e2e/package-lock.json
 
       # PHP for the storefront. Playwright's `webServer` block starts the PHP
       # built-in server itself (php -S 127.0.0.1:8080 -t ..); we only need PHP on
@@ -145,16 +166,17 @@ jobs:
         with:
           php-version: '8.2'
 
-      # Install deps, install the Chromium browser (+ OS deps), then run the
-      # suite. `npm test` runs pretest -> wait:health, which `wait-on`s the three
-      # Actuator health URLs (defined in e2e/package.json — not duplicated here)
-      # until UP, after which Playwright starts the PHP frontend and runs the
-      # products/members/orders specs. `npm ci || npm install` keeps the
-      # documented `npm ci` while tolerating the absent lockfile.
+      # Install deps deterministically from the committed lockfile (npm ci ONLY —
+      # no `|| npm install` fallback, so a drifted or missing lockfile fails the
+      # job instead of silently mutating dependencies), install the Chromium
+      # browser (+ OS deps), then run the suite. `npm test` runs pretest ->
+      # wait:health, which `wait-on`s the three Actuator health URLs (defined in
+      # e2e/package.json — not duplicated here) until UP, after which Playwright
+      # starts the PHP frontend and runs the products/members/orders specs.
       - name: Run Playwright e2e
         working-directory: kitchensink/e2e
         run: |
-          npm ci || npm install
+          npm ci
           npm run install:browsers
           npm test
 

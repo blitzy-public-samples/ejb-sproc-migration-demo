@@ -1,9 +1,15 @@
 package org.jboss.as.quickstarts.kitchensink.orders;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -16,6 +22,7 @@ import java.sql.Statement;
 
 import org.jboss.as.quickstarts.kitchensink.orders.client.MarketplaceClient;
 import org.jboss.as.quickstarts.kitchensink.orders.client.UsersClient;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.NoEligibleVendorException;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.repository.OrderDraftItemRepository;
 import org.jboss.as.quickstarts.kitchensink.orders.repository.OrderItemRepository;
@@ -24,11 +31,12 @@ import org.jboss.as.quickstarts.kitchensink.orders.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -91,10 +99,10 @@ class OrderServiceIT {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
-    @MockBean
+    @MockitoBean
     private MarketplaceClient marketplaceClient;
 
-    @MockBean
+    @MockitoBean
     private UsersClient usersClient;
 
     @BeforeEach
@@ -108,6 +116,9 @@ class OrderServiceIT {
         // its foreign key; a positive unit price guarantees non-zero subtotal/total; member 2 -> SILVER.
         when(marketplaceClient.selectBestVendor(anyLong(), anyInt())).thenReturn(1L);
         when(marketplaceClient.getPrice(anyLong(), anyLong(), anyInt())).thenReturn(new BigDecimal("9.99"));
+        // Default product weight is 0 for tests that do not exercise weight; the weight-accumulation
+        // test overrides this for its specific product (review C5).
+        when(marketplaceClient.getProductWeight(anyLong())).thenReturn(BigDecimal.ZERO);
         when(usersClient.getMemberTier(TEST_MEMBER_ID)).thenReturn("SILVER");
     }
 
@@ -154,14 +165,52 @@ class OrderServiceIT {
     }
 
     @Test
-    void testSubmitOrderRecordsPositiveSubtotal() {
+    void testSubmitOrderIncrementsMemberTotalSpendBySubtotal() {
         orderService.addToCart(TEST_MEMBER_ID, 5L, 2);
 
         Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
 
         Order order = orderRepository.findById(orderId).orElseThrow();
-        assertTrue(order.getSubtotal().signum() > 0,
-                "persisted order subtotal should be positive (orders-service does not own the member row,"
-                        + " so the legacy member.total_spend increment assertion is replaced)");
+        assertTrue(order.getSubtotal().signum() > 0, "persisted order subtotal should be positive");
+
+        // Source-A process_order side-effect (review C4 / AAP §0.6.1): member.total_spend is incremented
+        // by the order SUBTOTAL (Source A overrides the Source-B SQL, which added the total). orders-service
+        // owns no member row (boundary rule), so it performs the increment over HTTP via UsersClient; verify
+        // submitOrder called it exactly once with the order subtotal.
+        ArgumentCaptor<BigDecimal> amountCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(usersClient).incrementMemberTotalSpend(eq(TEST_MEMBER_ID), amountCaptor.capture());
+        assertEquals(0, order.getSubtotal().compareTo(amountCaptor.getValue()),
+                "total_spend must be incremented by the order subtotal (Source-A override of process_order)");
+    }
+
+    @Test
+    void testSubmitOrderAccumulatesProductWeightForShipping() {
+        // Override the default zero-weight stub: product 5 weighs 3.00 lb each; qty 5 -> 15.00 lb total.
+        when(marketplaceClient.getProductWeight(5L)).thenReturn(new BigDecimal("3.00"));
+        orderService.addToCart(TEST_MEMBER_ID, 5L, 5);
+
+        Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
+
+        Order order = orderRepository.findById(orderId).orElseThrow();
+        // ZIP 27601 -> Southeast zone @ 0.95/lb; shipping = GREATEST(5.99, 0.95 * 15.00) = 14.25.
+        // With the pre-fix behavior (weight hard-zeroed) this would have been the 5.99 floor, so this
+        // assertion specifically proves weight is now accumulated from the marketplace read (review C5).
+        assertEquals(0, new BigDecimal("14.25").compareTo(order.getShippingCost()),
+                "shipping must reflect accumulated cart weight (0.95/lb * 15.00 lb = 14.25), not the 5.99 floor");
+    }
+
+    @Test
+    void testSubmitOrderWithNoEligibleVendorThrowsAndPersistsNothing() {
+        // Product 5 has no eligible vendor (selectBestVendor -> null). The order must abort with
+        // NoEligibleVendorException rather than silently dropping the cart line (review M1).
+        when(marketplaceClient.selectBestVendor(eq(5L), anyInt())).thenReturn(null);
+        orderService.addToCart(TEST_MEMBER_ID, 5L, 2);
+
+        assertThrows(NoEligibleVendorException.class,
+                () -> orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false));
+
+        // The exception is thrown during orchestration, before any persistence and before step 7, so the
+        // @Transactional submit rolls back: the lifetime-spend increment must never have been attempted.
+        verify(usersClient, never()).incrementMemberTotalSpend(anyLong(), any());
     }
 }

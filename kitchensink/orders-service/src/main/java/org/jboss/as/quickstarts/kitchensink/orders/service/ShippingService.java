@@ -2,7 +2,6 @@ package org.jboss.as.quickstarts.kitchensink.orders.service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.util.Map;
 
 import org.jboss.as.quickstarts.kitchensink.orders.model.ShippingZone;
 import org.jboss.as.quickstarts.kitchensink.orders.repository.ShippingZoneRepository;
@@ -75,25 +74,6 @@ public class ShippingService {
         }
 
         return shippingCost.setScale(2, RoundingMode.HALF_UP);
-    }
-
-    /**
-     * Compatibility helper retained from the monolith. PRODUCT-WEIGHT GAP (W1):
-     * the monolith summed per-product weight_lbs via a local ProductRepository, but
-     * orders-service owns no Product entity and the marketplace HTTP contract
-     * (MarketplaceClient) exposes no weight endpoint, so per-product weights are
-     * unavailable here. Faithful to process_order's COALESCE(weight_lbs, 0), an
-     * unavailable weight contributes 0, so the estimated total weight is 0 until a
-     * weight contract is added. The productQuantities argument is retained for API parity.
-     *
-     * @param productQuantities map of product ID to quantity (retained for API parity; not read)
-     * @param destinationZip    the destination ZIP code
-     * @param expedite          whether expedited shipping is requested
-     * @return the shipping cost computed with a total weight of {@code 0}
-     */
-    public BigDecimal estimateShipping(Map<Long, Integer> productQuantities, String destinationZip, boolean expedite) {
-        BigDecimal totalWeight = BigDecimal.ZERO;
-        return calculateShipping(destinationZip, totalWeight, expedite);
     }
 
     private int parseZipPrefix(String destinationZip) {

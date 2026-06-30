@@ -8,6 +8,7 @@ import java.util.List;
 
 import org.jboss.as.quickstarts.kitchensink.orders.client.MarketplaceClient;
 import org.jboss.as.quickstarts.kitchensink.orders.client.UsersClient;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.NoEligibleVendorException;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.model.OrderDraftItem;
 import org.jboss.as.quickstarts.kitchensink.orders.model.OrderItem;
@@ -114,16 +115,16 @@ public class OrderService {
         // 6. Clear the draft cart (process_order: DELETE FROM order_draft_items WHERE member_id = ...).
         orderDraftItemRepository.deleteByMemberId(memberId);
 
-        // 7. member.total_spend increment -- INTENTIONALLY NOT PERFORMED HERE.
-        //    process_order updated member.total_spend; Source A overrides the SQL so the intended
-        //    increment is the order SUBTOTAL (computed.getSubtotal()), not the total. However, the
-        //    `member` table is owned by users-service: orders-service has no Member entity, the
-        //    cross-domain boundary rule (AAP 0.7.2) forbids writing it, and none of Contracts 1/2/3
-        //    is a member-write (they are pricing GET, tier GET, spend GET). Realizing the increment
-        //    would require a NEW orders->users write-contract that is out of current scope
-        //    (see AAP 0.6.1 / 0.6.5). The order row above already records the subtotal as the order's
-        //    own bookkeeping. (A private @Transactional write-only split is not introduced: Spring
-        //    self-invocation would bypass the proxy and a new bean is out of scope.)
+        // 7. Increment the member's lifetime total_spend by the order SUBTOTAL (review C4 / AAP 0.6.1:
+        //    Source A overrides the Source-B SQL, which added the total). The `member` table is owned by
+        //    users-service and the boundary rule (AAP 0.7.2) forbids orders-service from writing it
+        //    directly, so the increment is performed over HTTP through UsersClient against the
+        //    users-service internal write contract (POST /internal/members/{id}/total-spend). This is the
+        //    LAST step of the @Transactional submit: a MemberNotFoundException (404) or
+        //    ServiceUnavailableException (5xx/unreachable) propagates and rolls the whole order back, so
+        //    the order row and total_spend can never diverge. It is intentionally NOT part of
+        //    orchestrateOrder, so the non-transactional preview path never writes spend.
+        usersClient.incrementMemberTotalSpend(memberId, computed.getSubtotal());
 
         return orderId;
     }
@@ -151,10 +152,14 @@ public class OrderService {
             Long productId = draftItem.getProductId();
             int quantity = draftItem.getQuantity();
 
-            // select_best_vendor (over HTTP). Null vendor -> skip the line (faithful to monolith preview).
+            // select_best_vendor (over HTTP) via the AUTHORITATIVE Source-A /best-vendor endpoint.
+            // A null selection means no eligible/in-stock vendor for this line: abort the entire order
+            // (faithful to process_order, which failed the order rather than dropping the line) instead
+            // of silently skipping it and persisting a partial, under-charged order (review M1).
             Long vendorId = marketplaceClient.selectBestVendor(productId, quantity);
             if (vendorId == null) {
-                continue;
+                throw new NoEligibleVendorException(
+                        "No eligible vendor for product " + productId + " at quantity " + quantity);
             }
 
             // calculate_price (over HTTP). line_total = ROUND(unit_price * qty, 2) in BOTH paths (proc L251)
@@ -164,9 +169,17 @@ public class OrderService {
                     .setScale(2, RoundingMode.HALF_UP);
             subtotal = subtotal.add(lineTotal);
 
-            // PRODUCT-WEIGHT GAP (W1): orders-service has no Product entity and MarketplaceClient
-            // exposes no weight endpoint, so per-line weight contributes 0 -- faithful to
-            // process_order's COALESCE(weight_lbs, 0). totalWeight stays 0 until a weight contract exists.
+            // Accumulate cart weight for shipping (review C5). process_order summed
+            // COALESCE(weight_lbs, 0) * quantity by joining products; orders-service owns no Product
+            // entity (boundary rule, AAP 0.7.2) so it reads the per-product weight over HTTP. A
+            // null/absent weight contributes 0 (MarketplaceClient maps 404/null weight -> ZERO). No
+            // rounding here: weight is accumulated at full precision and ShippingService performs the
+            // single ROUND(...,2), faithful to the procedure which summed weight then rounded once.
+            BigDecimal productWeight = marketplaceClient.getProductWeight(productId);
+            if (productWeight == null) {
+                productWeight = BigDecimal.ZERO;
+            }
+            totalWeight = totalWeight.add(productWeight.multiply(BigDecimal.valueOf(quantity)));
 
             lineItems.add(new LineItemPreview(productId, vendorId, quantity, unitPrice, lineTotal));
         }

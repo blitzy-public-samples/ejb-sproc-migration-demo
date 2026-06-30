@@ -67,4 +67,40 @@
         <module>users-service</module>
         <module>orders-service</module>
     </modules>
+
+    <!--
+        Shared build configuration inherited by ALL three child modules.
+
+        maven-failsafe-plugin: the integration tests across every service are named *IT
+        (PricingServiceIT, VendorSelectionServiceIT, MemberRegistrationIT, TierRecalculationIT,
+        OrderServiceIT, DiscountServiceIT). Surefire deliberately ignores the *IT naming
+        convention, so without Failsafe `mvn verify` / `mvn install` only COMPILES those tests
+        and never RUNS them. Declaring the plugin here — once, at the aggregator parent — binds
+        the integration-test and verify goals for every child module uniformly, so all five+
+        integration tests execute during `verify`/`install` (and in CI). This supersedes the
+        former per-child Failsafe block that existed only in orders-service, guaranteeing the
+        marketplace-service and users-service ITs run too (review findings: marketplace-service
+        pom L68-75, users-service pom L97-108).
+
+        The plugin VERSION and the classesDirectory setting that lets @SpringBootTest run against
+        the module's compiled classes are inherited from spring-boot-starter-parent's
+        pluginManagement, so neither is restated here. Children that have no *IT tests (none
+        today) would simply find nothing to run — a harmless no-op.
+    -->
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
