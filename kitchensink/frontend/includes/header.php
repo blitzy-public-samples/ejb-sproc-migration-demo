@@ -51,22 +51,22 @@ $tierColor = $tierBadgeColors[$currentMemberTier] ?? '#cd7f32';
 <body>
 <header>
     <div class="brand"><?php echo htmlspecialchars(APP_NAME); ?></div>
-    <nav>
-        <a href="/frontend/index.php">Home</a>
-        <a href="/frontend/catalog.php">Catalog</a>
-        <a href="/frontend/cart.php">Cart</a>
+    <nav data-testid="nav">
+        <a href="/frontend/index.php" data-testid="nav-home">Home</a>
+        <a href="/frontend/catalog.php" data-testid="nav-catalog">Catalog</a>
+        <a href="/frontend/cart.php" data-testid="nav-cart">Cart</a>
         <?php if ($currentMemberId): ?>
-            <a href="/frontend/checkout.php">Checkout</a>
+            <a href="/frontend/checkout.php" data-testid="nav-checkout">Checkout</a>
         <?php endif; ?>
     </nav>
     <div class="member-info">
         <?php if ($currentMemberId && $currentMemberName): ?>
-            <span><?php echo htmlspecialchars($currentMemberName); ?></span>
-            <span class="tier-badge" style="background: <?php echo $tierColor; ?>">
+            <span data-testid="member-name"><?php echo htmlspecialchars($currentMemberName); ?></span>
+            <span class="tier-badge" style="background: <?php echo $tierColor; ?>" data-testid="member-tier-badge">
                 <?php echo htmlspecialchars($currentMemberTier); ?>
             </span>
         <?php else: ?>
-            <a href="/frontend/index.php" style="color:#cce0f5;">Login</a>
+            <a href="/frontend/index.php" style="color:#cce0f5;" data-testid="nav-login">Login</a>
         <?php endif; ?>
     </div>
 </header>
