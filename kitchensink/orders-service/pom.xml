@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    orders-service — Spring Boot 3.x child module of the kitchensink aggregator.
+
+    Bounded context: orders, shopping cart, shipping, and customer discounts.
+    Runtime: an executable Spring Boot JAR listening on port 8082 under the servlet
+    context-path /orders.
+    Persistence: maps ONLY the tables it owns (orders, order_items, order_draft_items,
+    shipping_zones, discount_audit) in the shared PostgreSQL database, under Hibernate
+    ddl-auto=validate (the schema is frozen and authoritative).
+
+    Cross-domain boundary rule (AAP §0.7.2): this module declares NO compile-scope
+    dependency on any sibling service module and shares no common code module. The only
+    legal cross-domain channel is HTTP, performed at runtime by the @Component client
+    gateways (MarketplaceClient → marketplace-service, UsersClient → users-service). The
+    dependency set below is therefore intentionally minimal.
+
+    Version management: every Spring Boot starter, the JDBC driver, the Testcontainers
+    artifacts, and the build plugins are governed by the Spring Boot dependency BOM, which
+    is inherited transitively through the aggregator parent (whose own parent is
+    spring-boot-starter-parent). Consequently NONE of them declare an explicit <version>
+    here — pinning them locally would defeat centralized, conflict-free version management.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Parent = the kitchensink aggregator (packaging=pom) located one directory up, NOT
+        spring-boot-starter-parent directly. The aggregator's own parent IS
+        spring-boot-starter-parent:3.5.x, so the Spring Boot dependency management (BOM) and
+        the Java 17 baseline flow down to this module transitively. groupId and version are
+        inherited from this parent and are therefore deliberately NOT redeclared below.
+    -->
+    <parent>
+        <groupId>org.jboss.as.quickstarts</groupId>
+        <artifactId>kitchensink</artifactId>
+        <version>8.0.0.GA</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!--
+        Only the module-specific coordinate is declared. The inherited groupId
+        (org.jboss.as.quickstarts) and version (8.0.0.GA) keep this service aligned with its
+        two siblings while preserving the original package/coordinate provenance.
+    -->
+    <artifactId>orders-service</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Net32 Dental Supply :: orders-service</name>
+    <description>Orders, cart, shipping, and discount bounded context (Spring Boot 3.x)</description>
+
+    <dependencies>
+        <!--
+            Web MVC + embedded Tomcat: hosts the @RestController endpoints (/api/orders plus
+            the producer-side /internal spend endpoint) and supplies the synchronous HTTP
+            client (RestClient/RestTemplate) used by the cross-domain client gateways.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!--
+            Spring Data JPA + Hibernate: backs the JpaRepository data layer that replaces the
+            former hand-rolled EntityManager repositories. Brings the persistence API
+            transitively, so the relocated entity classes retain their persistence
+            annotations unchanged.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!--
+            Bean Validation (Hibernate Validator): supplies the validation API transitively
+            for the constraint annotations carried on the entities and request payloads.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+            Actuator: exposes /actuator/health, reachable at /orders/actuator/health given the
+            context-path, for the Dockerfile HEALTHCHECK and the CI readiness (wait-on) gate.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!--
+            PostgreSQL JDBC driver — runtime scope only (the application code compiles against
+            JPA, not the driver). Version is BOM-managed.
+        -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+            Test harness: JUnit 5, Mockito (@MockBean to stub the client gateway interfaces in
+            the integration tests), AssertJ, and MockRestServiceServer (via spring-test) for
+            exercising the gateway implementations.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            Testcontainers PostgreSQL: provisions an ephemeral PostgreSQL container for the
+            @SpringBootTest integration tests (seeded from the authoritative db/*.sql scripts),
+            wired in via @DynamicPropertySource.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            Testcontainers JUnit 5 integration: enables the @Testcontainers / @Container
+            lifecycle in the integration tests.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Repackages the module into an executable, self-contained JAR
+                (orders-service-8.0.0.GA.jar) that the multi-stage Dockerfile runs. Plugin
+                version is managed by the Spring Boot parent.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!--
+                Failsafe runs the integration tests (OrderServiceIT, DiscountServiceIT) during
+                the verify phase. Surefire intentionally ignores the *IT naming convention, so
+                this execution — binding the integration-test and verify goals — is required
+                for the integration tests to actually run during `mvn verify` / `mvn install`
+                (and in CI). Plugin version and the classesDirectory setting that lets
+                @SpringBootTest run against compiled classes are inherited from the Spring Boot
+                parent's pluginManagement, so neither is restated here.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
