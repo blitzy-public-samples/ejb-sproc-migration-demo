@@ -3,6 +3,9 @@ package org.jboss.as.quickstarts.kitchensink.orders.rest;
 import java.util.List;
 import java.util.Map;
 
+import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.service.OrderService;
 import org.springframework.http.HttpStatus;
@@ -35,12 +38,19 @@ import org.springframework.web.bind.annotation.RestController;
  * this service's {@link OrderService} bean, which performs any cross-domain reads over HTTP
  * through its client gateways.</p>
  *
- * <p>Exception mapping is intentionally minimal and matches the monolith: {@code previewOrder}
- * and {@code submitOrder} use an inline {@code try/catch} that surfaces compute errors as
- * {@code 500 INTERNAL_SERVER_ERROR}; no {@code @RestControllerAdvice}/{@code @ExceptionHandler}
- * is introduced here. The domain exceptions raised inside {@link OrderService} are caught by
- * those inline handlers, and the {@code @Transactional} boundary inside {@link OrderService}
- * performs rollback before the exception propagates to this layer.</p>
+ * <p>Exception mapping follows the AAP &sect;0.3.3 "centralized exception mapping" pattern and the
+ * Contract Authority (AAP &sect;0.6.2 / &sect;0.7.3). The three cross-domain domain exceptions are
+ * mapped to their contractual HTTP status by {@link OrdersRestExceptionHandler}
+ * ({@code @RestControllerAdvice}): {@link MemberNotFoundException} and
+ * {@link InventoryNotFoundException} &rarr; {@code 404}, {@link ServiceUnavailableException} &rarr;
+ * {@code 503}. Because {@code previewOrder}/{@code submitOrder} wrap their service call in a broad
+ * {@code try/catch} (whose generic {@code catch (Exception e)} surfaces all <em>other</em> compute
+ * failures — empty cart, request-body type mismatch, foreign-key violation, overflow — as a faithful
+ * {@code 500 INTERNAL_SERVER_ERROR}, preserving monolith behavior per AAP &sect;0.7.2), those two
+ * methods explicitly <em>re-throw</em> the three domain exceptions ahead of the generic catch so they
+ * propagate to the advice instead of being flattened to {@code 500}. This resolves QA INC-2 Finding F1
+ * (Contract 2 missing-member must surface as {@code 404}, not {@code 500}). The {@code @Transactional}
+ * boundary inside {@link OrderService} still performs rollback before the exception propagates here.</p>
  */
 @RestController
 @RequestMapping("/api/orders")
@@ -131,6 +141,11 @@ public class OrderResourceRESTService {
         try {
             OrderService.OrderPreview preview = orderService.previewOrder(memberId, zip, expedite);
             return ResponseEntity.ok(preview);
+        } catch (MemberNotFoundException | InventoryNotFoundException | ServiceUnavailableException e) {
+            // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/503,
+            // AAP §0.6.2). Re-throw so OrdersRestExceptionHandler (@RestControllerAdvice) maps them,
+            // rather than letting the generic catch below flatten them to 500 (QA INC-2 Finding F1).
+            throw e;
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body("Could not preview order: " + e.getMessage());
@@ -159,6 +174,11 @@ public class OrderResourceRESTService {
         try {
             Long orderId = orderService.submitOrder(memberId, zip, expedite);
             return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("orderId", orderId));
+        } catch (MemberNotFoundException | InventoryNotFoundException | ServiceUnavailableException e) {
+            // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/503,
+            // AAP §0.6.2). Re-throw so OrdersRestExceptionHandler (@RestControllerAdvice) maps them,
+            // rather than letting the generic catch below flatten them to 500 (QA INC-2 Finding F1).
+            throw e;
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body("Could not submit order: " + e.getMessage());
