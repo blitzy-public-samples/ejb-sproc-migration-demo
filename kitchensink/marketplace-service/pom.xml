@@ -20,11 +20,11 @@
         version in the whole project; every other coordinate inherits its version
         from this parent's managed dependencies.
 
-        Version 3.5.16 is the concrete latest Spring Boot 3.5.x patch pinned for this
-        build (AAP §0.5.1: "the latest 3.x patch at build time"). It is the version
-        provisioned in the local Maven repository for reproducible, offline-capable
-        builds, is the final 3.x feature generation, and requires Java 17 — matching
-        the target runtime.
+        Version 3.5.3 is the concrete Spring Boot 3.5.x patch pinned for this build
+        (AAP §0.5.1: "the latest 3.x patch at build time, e.g. 3.5.3"), and is the
+        version mandated by the foundation-layer checkpoint as the single hand-pinned
+        coordinate. It is a 3.x feature generation and requires Java 17 — matching the
+        target runtime. Every other coordinate stays BOM-managed (no explicit version).
 
         The empty <relativePath/> is REQUIRED so Maven resolves spring-boot-starter-parent
         from the repository instead of treating the sibling `../pom.xml` (the kitchensink
@@ -33,14 +33,15 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.5.16</version>
+        <version>3.5.3</version>
         <relativePath/>
     </parent>
 
     <groupId>org.jboss.as.quickstarts.kitchensink</groupId>
     <artifactId>marketplace-service</artifactId>
     <version>8.0.0.GA</version>
-    <!-- No <packaging> element: defaults to `jar`, repackaged into an executable Spring Boot fat JAR. -->
+    <!-- Explicit `jar` packaging (repackaged into an executable Spring Boot fat JAR). -->
+    <packaging>jar</packaging>
     <name>marketplace-service</name>
     <description>Marketplace service: product catalog, pricing, and vendor selection (Spring Boot).</description>
 

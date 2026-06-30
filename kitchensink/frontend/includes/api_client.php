@@ -5,13 +5,45 @@
  */
 
 /**
+ * Resolves the correct per-service API base URL for a given REST path.
+ *
+ * The frontend was originally written against a single monolith base URL under which every
+ * resource path (/products, /orders/..., /members/...) was served by one host. After the
+ * monolith was decomposed into three Spring Boot services, each resource is owned by a
+ * different service (its own host/port/context-path), so the base URL must be chosen per
+ * call from the path's first segment. The preserved endpoint paths all sit under each
+ * service's "/api" base mapping, which the per-service constants in config.php already include.
+ *
+ * This performs base-URL SELECTION ONLY — it changes which service host a request is sent to
+ * (the permitted "repoint the API base URLs" migration concern) and alters no request payload,
+ * header, response handling, or any other behavior.
+ *
+ * @param string $path API path beginning with the owning resource segment (e.g. "/products").
+ * @return string      The owning service's API base URL with no trailing slash
+ *                     (e.g. "http://localhost:8082/orders/api").
+ */
+function api_base_for_path(string $path): string {
+    if (str_starts_with($path, '/products')) {
+        return MARKETPLACE_API_BASE_URL;
+    }
+    if (str_starts_with($path, '/orders')) {
+        return ORDERS_API_BASE_URL;
+    }
+    if (str_starts_with($path, '/members')) {
+        return USERS_API_BASE_URL;
+    }
+    // Fallback for any unanticipated path: API_BASE_URL (the orders API base, see config.php).
+    return API_BASE_URL;
+}
+
+/**
  * Perform a GET request to the REST API.
  *
  * @param string $path  API path relative to API_BASE_URL (e.g. "/products")
  * @return mixed        Decoded JSON response, or null on failure
  */
 function api_get(string $path) {
-    $url = API_BASE_URL . $path;
+    $url = api_base_for_path($path) . $path;
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -37,7 +69,7 @@ function api_get(string $path) {
  * @return array        ['code' => HTTP status, 'body' => decoded response]
  */
 function api_post(string $path, array $data = []) {
-    $url     = API_BASE_URL . $path;
+    $url     = api_base_for_path($path) . $path;
     $payload = json_encode($data);
     $ch      = curl_init($url);
     curl_setopt_array($ch, [
@@ -69,7 +101,7 @@ function api_post(string $path, array $data = []) {
  * @return array        ['code' => HTTP status, 'body' => decoded response]
  */
 function api_delete(string $path) {
-    $url = API_BASE_URL . $path;
+    $url = api_base_for_path($path) . $path;
     $ch  = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
