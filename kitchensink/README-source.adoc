@@ -147,7 +147,7 @@ The repository-root workflow `.github/workflows/ci.yml` runs the same `mvn -B cl
 
 == Container images
 
-Each service is packaged as a container image through a multi-stage `Dockerfile` (a `maven:3.9-eclipse-temurin-17` build stage that produces the fat JAR, and an `eclipse-temurin:17-jre-alpine` runtime stage). The `marketplace-service` and `users-service` Dockerfiles are in place; the `orders-service` Dockerfile is forthcoming as that module's migration completes. Build and run an image as follows (shown for `marketplace-service`; repeat for the others, mapping ports `8082` and `8083`):
+Each service is packaged as a container image through a multi-stage `Dockerfile` (a `maven:3.9-eclipse-temurin-17` build stage that produces the fat JAR, and an `eclipse-temurin:17-jre-alpine` runtime stage). All three services — `marketplace-service`, `orders-service`, and `users-service` — provide a Dockerfile. Build and run an image as follows (shown for `marketplace-service`; repeat for the others, mapping ports `8082` and `8083`):
 
 [source,bash]
 ----
