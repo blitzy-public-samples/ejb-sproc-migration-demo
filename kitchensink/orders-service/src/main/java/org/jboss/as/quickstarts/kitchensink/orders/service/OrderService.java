@@ -6,6 +6,8 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -59,6 +61,19 @@ public class OrderService {
         this.discountService = discountService;
         this.shippingService = shippingService;
     }
+
+    /**
+     * Self-reference to this bean's Spring proxy, injected lazily to avoid a constructor-time
+     * circular dependency. submitOrder() is intentionally NOT @Transactional (so the cross-service
+     * HTTP performed in orchestrateOrder() runs OUTSIDE any transaction, per §0.7.2); it must
+     * therefore invoke the @Transactional persistConfirmedOrder() THROUGH this proxy rather than via
+     * 'this'. A plain self-invocation ('this.persistConfirmedOrder(...)') would bypass the proxy, the
+     * @Transactional boundary would not be applied, and the derived deleteByMemberId() cart-clear
+     * would fail with TransactionRequiredException for lack of an active transaction.
+     */
+    @Autowired
+    @Lazy
+    private OrderService self;
 
     // ----- cart operations -----
 
@@ -139,8 +154,10 @@ public class OrderService {
         // Phase 1: calculation/preview. All marketplace + users HTTP happens here, BEFORE the tx.
         OrderPreview preview = orchestrateOrder(memberId, destinationZip, expedite);
 
-        // Phase 2: single local transactional persist (order + items + cart clear).
-        Long orderId = persistConfirmedOrder(memberId, preview);
+        // Phase 2: single local transactional persist (order + items + cart clear). Invoked through
+        // the 'self' proxy (not 'this') so the @Transactional boundary on persistConfirmedOrder is
+        // actually applied -- a direct self-invocation would bypass the proxy.
+        Long orderId = self.persistConfirmedOrder(memberId, preview);
 
         // Phase 3: GAP-3 (§0.6.6) member total_spend increment. Intentionally POST-COMMIT and
         // outside the orders transaction: orders-service must not write the member table, and the
@@ -157,11 +174,14 @@ public class OrderService {
      * Single local @Transactional boundary: persist the CONFIRMED Order, persist its OrderItem
      * rows, and clear the member's draft cart. No cross-service HTTP occurs inside this method.
      *
-     * NOTE (Spring proxying): submitOrder() calls this method via 'this', so the @Transactional
-     * proxy does not wrap it; however every Spring Data repository write is itself transactional,
-     * so the order, its items, and the cart-clear each commit. submitOrder() is deliberately NOT
-     * annotated @Transactional so that no transaction is open while the cross-service HTTP calls
-     * in orchestrateOrder() run (the transaction-vs-HTTP ordering rule, §0.7.2).
+     * NOTE (Spring proxying): submitOrder() invokes this method through the injected 'self' proxy
+     * (NOT via 'this'), so this @Transactional boundary IS applied and the order, its items, and the
+     * derived deleteByMemberId() cart-clear all commit together as one atomic unit. The cart-clear in
+     * particular REQUIRES this ambient transaction: a derived delete query (SELECT + em.remove) is not
+     * self-transactional the way SimpleJpaRepository.save() is, so without the boundary it would throw
+     * TransactionRequiredException. submitOrder() itself is deliberately NOT annotated @Transactional
+     * so that no transaction is open while the cross-service HTTP calls in orchestrateOrder() run (the
+     * transaction-vs-HTTP ordering rule, §0.7.2).
      */
     @Transactional
     public Long persistConfirmedOrder(Long memberId, OrderPreview preview) {
