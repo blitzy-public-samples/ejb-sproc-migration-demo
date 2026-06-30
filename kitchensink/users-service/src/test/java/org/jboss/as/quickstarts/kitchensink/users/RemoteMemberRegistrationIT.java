@@ -32,7 +32,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * &sect;0.6.7 - this is the regression guard the production Javadoc cites as
  * "RemoteMemberRegistrationIT parity").</p>
  *
- * <p>This is a TRUE black box: it imports no production class (not even {@link Member}); the request
+ * <p>This is a TRUE black box: it imports no production class (not even {@code Member}); the request
  * body is a plain JSON String and the response is asserted purely on status code + body, using the
  * JDK-built-in {@code java.net.http.HttpClient} (faithful to the legacy transport and honoring the
  * cross-domain boundary rule). The legacy {@code SERVER_HOST}/{@code server.host} env-var host
