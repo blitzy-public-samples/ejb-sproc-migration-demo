@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
@@ -39,9 +40,21 @@ public class MarketplaceClient {
         } catch (HttpClientErrorException.NotFound e) {
             throw new InventoryNotFoundException(
                     "No inventory found for productId=" + productId + ", vendorId=" + vendorId, e);
+        } catch (HttpClientErrorException e) {
+            // Non-404 4xx (e.g. 401/403 on shared-token misconfiguration): the Contract Authority
+            // (§0.6.2) maps only 404 + 5xx, so fail fast as 503 rather than leaking a raw 500.
+            throw new ServiceUnavailableException(
+                    "marketplace-service returned unexpected " + e.getStatusCode()
+                            + " while fetching unit price for productId=" + productId, e);
         } catch (HttpServerErrorException e) {
             throw new ServiceUnavailableException(
                     "marketplace-service unavailable while fetching unit price for productId=" + productId, e);
+        } catch (ResourceAccessException e) {
+            // Connect/read timeout (bounded by RestTemplateConfig) or other I/O failure: the peer is
+            // slow or unreachable. Fail fast as 503 rather than blocking indefinitely or leaking a 500.
+            throw new ServiceUnavailableException(
+                    "marketplace-service unreachable/timed out while fetching unit price for productId="
+                            + productId, e);
         }
     }
 
@@ -57,9 +70,21 @@ public class MarketplaceClient {
         } catch (HttpClientErrorException.NotFound e) {
             throw new InventoryNotFoundException(
                     "No quote available for productId=" + productId + " (qty=" + qty + ")", e);
+        } catch (HttpClientErrorException e) {
+            // Non-404 4xx (e.g. 401/403 on shared-token misconfiguration): the Contract Authority
+            // (§0.6.2) maps only 404 + 5xx, so fail fast as 503 rather than leaking a raw 500.
+            throw new ServiceUnavailableException(
+                    "marketplace-service returned unexpected " + e.getStatusCode()
+                            + " while fetching quote for productId=" + productId, e);
         } catch (HttpServerErrorException e) {
             throw new ServiceUnavailableException(
                     "marketplace-service unavailable while fetching quote for productId=" + productId, e);
+        } catch (ResourceAccessException e) {
+            // Connect/read timeout (bounded by RestTemplateConfig) or other I/O failure: the peer is
+            // slow or unreachable. Fail fast as 503 rather than blocking indefinitely or leaking a 500.
+            throw new ServiceUnavailableException(
+                    "marketplace-service unreachable/timed out while fetching quote for productId="
+                            + productId, e);
         }
     }
 }

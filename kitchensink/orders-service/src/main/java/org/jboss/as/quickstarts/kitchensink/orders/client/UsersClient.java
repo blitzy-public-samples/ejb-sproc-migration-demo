@@ -11,6 +11,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
@@ -73,9 +74,21 @@ public class UsersClient {
             // named type is never imported (§0.7.2 no-shared-classes rule).
             throw new MemberNotFoundException(
                     "Member not found in users-service for memberId=" + memberId, e);
+        } catch (HttpClientErrorException e) {
+            // Non-404 4xx (e.g. 401/403 on shared-token misconfiguration): the Contract Authority
+            // (§0.6.2, Contract 2) maps only 404 + 5xx, so fail fast as 503 rather than leaking a
+            // raw 500 out of the orders-service controller.
+            throw new ServiceUnavailableException(
+                    "users-service returned unexpected " + e.getStatusCode()
+                            + " while fetching tier for memberId=" + memberId, e);
         } catch (HttpServerErrorException e) {
             throw new ServiceUnavailableException(
                     "users-service unavailable while fetching tier for memberId=" + memberId, e);
+        } catch (ResourceAccessException e) {
+            // Connect/read timeout (bounded by RestTemplateConfig) or other I/O failure: peer slow or
+            // unreachable. Fail fast as 503 rather than blocking indefinitely or leaking a raw 500.
+            throw new ServiceUnavailableException(
+                    "users-service unreachable/timed out while fetching tier for memberId=" + memberId, e);
         }
     }
 
@@ -113,9 +126,22 @@ public class UsersClient {
         try {
             restTemplate.exchange(
                     url, HttpMethod.POST, new HttpEntity<>(body, headers), Void.class, memberId);
+        } catch (HttpClientErrorException e) {
+            // Any 4xx on this post-commit increment (e.g. 401/403 token misconfig, 400/404) is outside
+            // the Contract Authority. GAP-3 is eventually-consistent (the order already committed), so
+            // fail fast as 503 - the documented spend-POST failure signal - instead of leaking a raw
+            // 500; idempotency by orderId keeps a later retry safe.
+            throw new ServiceUnavailableException(
+                    "users-service returned unexpected " + e.getStatusCode()
+                            + " while incrementing spend for memberId=" + memberId, e);
         } catch (HttpServerErrorException e) {
             throw new ServiceUnavailableException(
                     "users-service unavailable while incrementing spend for memberId=" + memberId, e);
+        } catch (ResourceAccessException e) {
+            // Connect/read timeout (bounded by RestTemplateConfig) or other I/O failure: peer slow or
+            // unreachable. Fail fast as 503; the order already committed and the increment is idempotent.
+            throw new ServiceUnavailableException(
+                    "users-service unreachable/timed out while incrementing spend for memberId=" + memberId, e);
         }
     }
 }

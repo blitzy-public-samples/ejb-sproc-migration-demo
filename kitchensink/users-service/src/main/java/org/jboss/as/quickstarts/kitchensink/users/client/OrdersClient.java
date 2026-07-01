@@ -10,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import org.jboss.as.quickstarts.kitchensink.users.exception.ServiceUnavailableException;
@@ -69,9 +70,22 @@ public class OrdersClient {
             return dto != null ? dto.totalSpend() : BigDecimal.ZERO;
         } catch (HttpClientErrorException.NotFound e) {
             return BigDecimal.ZERO;
+        } catch (HttpClientErrorException e) {
+            // Non-404 4xx (e.g. 401/403 on shared-token misconfiguration): the Contract Authority
+            // (§0.6.2, Contract 3) maps only 404 (-> ZERO, preserved above) + 5xx, so fail fast as
+            // 503 rather than letting a raw HttpClientErrorException escape this client.
+            throw new ServiceUnavailableException(
+                    "orders-service returned unexpected " + e.getStatusCode()
+                            + " while fetching spend for memberId=" + memberId, e);
         } catch (HttpServerErrorException e) {
             throw new ServiceUnavailableException(
                     "orders-service unavailable while fetching spend for memberId=" + memberId, e);
+        } catch (ResourceAccessException e) {
+            // Connect/read timeout (bounded by RestTemplateConfig) or other I/O failure: peer slow or
+            // unreachable. Fail fast as 503; TierRecalculationService catches this per-member and skips
+            // that member so the nightly run continues.
+            throw new ServiceUnavailableException(
+                    "orders-service unreachable/timed out while fetching spend for memberId=" + memberId, e);
         }
     }
 }
