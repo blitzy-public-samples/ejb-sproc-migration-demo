@@ -94,7 +94,7 @@ java -jar orders-service/target/orders-service-*.jar
 java -jar users-service/target/users-service-*.jar
 ----
 
-`SECURITY_INTERNAL_TOKEN` is the shared secret that guards the internal service-to-service endpoints and signs the member-scoped access tokens. It is *required* by `orders-service` and `users-service`, which *fail fast at startup* (with a placeholder-resolution error) if it is unset, and every cooperating service must be given the *same* value. `marketplace-service` makes no authenticated cross-service calls and therefore does not require it — it starts with only the database credentials above.
+`SECURITY_INTERNAL_TOKEN` is the shared secret that guards the internal, service-to-service endpoints (`GET /orders/internal/**` and `POST /users/api/members/{id}/spend` — see _Verifying the services_ below); peer services present it as the `X-Internal-Service-Token` header. It is *required* by `orders-service` and `users-service`, which *fail fast at startup* (with a placeholder-resolution error) if it is unset, and every cooperating service must be given the *same* value. `marketplace-service` makes no authenticated cross-service calls and therefore does not require it — it starts with only the database credentials above.
 
 Cross-service calls are configured through `services.*.base-url` properties, whose defaults already point at the local ports and context-paths shown above:
 
@@ -121,27 +121,29 @@ curl http://localhost:8083/users/actuator/health
 # each responds with HTTP 200 and a body whose status is UP, e.g. {"status":"UP","groups":["liveness","readiness"]}
 ----
 
-The original REST endpoints are preserved, each under its service's base mapping. Note that most member-scoped and administrative read endpoints — including `GET /orders/api/orders/{id}` and the `GET /users/api/members` listing — are access-controlled and return `401 Unauthorized` unless the caller is authorized; a trusted service authenticates with the shared-secret header `X-Internal-Service-Token: <SECURITY_INTERNAL_TOKEN>` (SERVICE access). Member registration (`POST /users/api/members`) is the only open, unauthenticated endpoint. The calls below are illustrative rather than exhaustive — each service exposes further domain endpoints (for example marketplace pricing, quote, and vendor ranking; orders cart, preview, and submit; and the users loyalty-tier lookup). Example calls:
+The original REST endpoints are preserved, each under its service's base mapping. The domain *read* endpoints are *open* — they require no authorization header and return `200 OK` directly — so the PHP storefront can consume them without credentials. These include the marketplace catalog (`GET /marketplace/api/products`), order lookup and history (`GET /orders/api/orders/{id}`, `GET /orders/api/orders/member/{memberId}`), and the members surface (`GET /users/api/members`, `GET /users/api/members/{id}`, `GET /users/api/members/{id}/tier`). Member registration (`POST /users/api/members`) is likewise open (protected only by a per-client-IP rate limit). Only the *internal, service-to-service* endpoints are token-guarded and return `401 Unauthorized` without a valid `X-Internal-Service-Token: <SECURITY_INTERNAL_TOKEN>` header — namely `GET /orders/internal/members/{id}/spend` (orders-service) and `POST /users/api/members/{id}/spend` (users-service, the cross-service spend increment); these are invoked only by peer services, never by the storefront. The calls below are illustrative rather than exhaustive — each service exposes further domain endpoints (for example marketplace pricing, quote, and vendor ranking; orders cart, preview, and submit; and the users loyalty-tier lookup). Example calls:
 
 [source,bash]
 ----
 # marketplace-service — product catalog (open; returns the seeded catalog)
 curl http://localhost:8081/marketplace/api/products
 
-# orders-service — look up an order by id
-# (SERVICE/admin authorization required; returns 401 without the token header)
-curl -H "X-Internal-Service-Token: $SECURITY_INTERNAL_TOKEN" \
-     http://localhost:8082/orders/api/orders/{id}
+# orders-service — look up an order by id (open read; no token; returns 200)
+curl http://localhost:8082/orders/api/orders/{id}
 
-# users-service — list members
-# (SERVICE/admin authorization required; returns 401 without the token header)
-curl -H "X-Internal-Service-Token: $SECURITY_INTERNAL_TOKEN" \
-     http://localhost:8083/users/api/members
+# users-service — list members (open read; no token; returns 200)
+curl http://localhost:8083/users/api/members
 
 # users-service — register a new member (open endpoint; no authorization required)
 curl -X POST http://localhost:8083/users/api/members \
      -H 'Content-Type: application/json' \
      -d '{"name":"Jane Doe","email":"jane.doe@example.com","phoneNumber":"2125551234"}'
+
+# orders-service — INTERNAL service-to-service call: read a member's recent spend.
+# Token-guarded: returns 401 without the header. Called only by peer services
+# (users-service during loyalty-tier recalculation), never by the storefront.
+curl -H "X-Internal-Service-Token: $SECURITY_INTERNAL_TOKEN" \
+     "http://localhost:8082/orders/internal/members/{id}/spend?days=90"
 ----
 
 == Running the integration tests

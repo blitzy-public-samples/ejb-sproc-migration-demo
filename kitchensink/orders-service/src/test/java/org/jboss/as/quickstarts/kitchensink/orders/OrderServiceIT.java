@@ -17,6 +17,7 @@
 package org.jboss.as.quickstarts.kitchensink.orders;
 
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -246,6 +247,24 @@ public class OrderServiceIT {
     }
 
     /**
+     * Stubs the product-existence probe that {@code addToCart()} now performs BEFORE persisting a
+     * draft row (QA fix — see {@code OrderService.addToCart} / {@code MarketplaceClient.verifyProductExists}):
+     * {@code GET {marketplace.base-url}/api/products/{id}} &rarr; {@code 200} (empty body, discarded).
+     *
+     * <p>The matcher {@code endsWith("/api/products/" + productId)} is deliberately DISJOINT from the
+     * {@link #expectQuote()} matcher {@code containsString("/quote")} (the quote URI ends with
+     * {@code /quote?qty=...}) and from the {@code /api/members/.../tier|spend} stubs, so there is no
+     * cross-matching under {@code ignoreExpectOrder(true)}. One expectation is registered per DISTINCT
+     * product id a test enqueues; {@link ExpectedCount#manyTimes()} tolerates repeated adds of the same
+     * id. A 200 (rather than 404) lets {@code addToCart()} proceed to the draft-row insert.</p>
+     */
+    private void expectProductExists(long productId) {
+        mockServer.expect(ExpectedCount.manyTimes(), requestTo(endsWith("/api/products/" + productId)))
+            .andExpect(method(HttpMethod.GET))
+            .andRespond(withSuccess());
+    }
+
+    /**
      * Stubs Contract&nbsp;2 (member tier):
      * {@code GET {users.base-url}/api/members/2/tier} &rarr; {@code 200 {"tier":"SILVER"}}.
      * Invoked once per orchestration, inside {@code DiscountService.calculateDiscount()}.
@@ -272,10 +291,13 @@ public class OrderServiceIT {
 
     /**
      * Test 1: {@code addToCart()} should persist a new {@code order_draft_items} row.
-     * No stubs &mdash; {@code addToCart()} performs no cross-service HTTP.
+     * Stubs only the product-existence probe (QA fix): {@code addToCart()} now validates the product
+     * with marketplace-service ({@code GET /api/products/{id}}) BEFORE the insert, but performs no
+     * other cross-service HTTP (no tier/quote/spend).
      */
     @Test
     public void testAddToCartInsertsRow() {
+        expectProductExists(1L);
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
 
         long count = orderDraftItemRepository.findByMemberId(TEST_MEMBER_ID).size();
@@ -292,6 +314,8 @@ public class OrderServiceIT {
     public void testPreviewOrderReturnsNonZeroTotal() {
         expectQuote();
         expectTier();
+        expectProductExists(1L);
+        expectProductExists(3L);
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
         orderService.addToCart(TEST_MEMBER_ID, 3L, 10);
 
@@ -313,6 +337,7 @@ public class OrderServiceIT {
         expectQuote();
         expectTier();
         expectSpend(ExpectedCount.manyTimes());
+        expectProductExists(2L);
         orderService.addToCart(TEST_MEMBER_ID, 2L, 3);
 
         Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
@@ -333,6 +358,8 @@ public class OrderServiceIT {
         expectQuote();
         expectTier();
         expectSpend(ExpectedCount.manyTimes());
+        expectProductExists(1L);
+        expectProductExists(4L);
         orderService.addToCart(TEST_MEMBER_ID, 1L, 2);
         orderService.addToCart(TEST_MEMBER_ID, 4L, 1);
 
@@ -360,6 +387,7 @@ public class OrderServiceIT {
         expectTier();
         // The spend increment must occur exactly once (post-commit); mockServer.verify() asserts it.
         expectSpend(ExpectedCount.once());
+        expectProductExists(5L);
 
         orderService.addToCart(TEST_MEMBER_ID, 5L, 2);
         orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
@@ -386,6 +414,7 @@ public class OrderServiceIT {
     public void testPreviewOrderExactParity() {
         expectQuote();
         expectTier();
+        expectProductExists(1L);
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
 
         OrderService.OrderPreview preview = orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false);
@@ -429,6 +458,9 @@ public class OrderServiceIT {
                 requestTo(containsString("/api/members/" + TEST_MEMBER_ID + "/tier")))
             .andExpect(method(HttpMethod.GET))
             .andRespond(withStatus(HttpStatus.NOT_FOUND));
+        // The product-existence probe in addToCart must succeed (product 1 exists) so the row is
+        // enqueued; the member-not-found rejection is then exercised later, at previewOrder().
+        expectProductExists(1L);
 
         // Non-empty cart proves the member guard fires FIRST (before the empty-cart and quote steps).
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
@@ -460,6 +492,7 @@ public class OrderServiceIT {
             .andExpect(jsonPath("$.orderId").isNumber())
             .andExpect(jsonPath("$.amount").value(49.55))
             .andRespond(withSuccess());
+        expectProductExists(1L);
 
         orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
         Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);

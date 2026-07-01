@@ -87,4 +87,47 @@ public class MarketplaceClient {
                             + productId, e);
         }
     }
+
+    /**
+     * Lightweight product-existence probe. Calls the marketplace catalog read
+     * {@code GET {marketplace.base-url}/api/products/{productId}}, which returns 200 when the
+     * product exists and 404 when it does not (legacy catalog semantics preserved by
+     * marketplace-service's {@code ProductResourceRESTService#getProduct}).
+     *
+     * <p>Used by {@code OrderService.addToCart} to reject an unknown {@code productId} with a clean
+     * 404 BEFORE a draft row is persisted, instead of letting the value trip the
+     * {@code order_draft_items.product_id -> products(id)} foreign key and surface as a generic
+     * HTTP 500 ({@code DataIntegrityViolationException}). This is the proactive cross-service
+     * validation the QA finding recommends: orders-service cannot import marketplace types, so the
+     * check is performed over HTTP through this anti-corruption-layer client.</p>
+     *
+     * <p>The response body is intentionally read as a {@code String} and discarded so that no
+     * marketplace {@code Product} type crosses the service boundary (DTO-per-boundary rule,
+     * §0.7.2). Error mapping mirrors {@link #getUnitPrice} / {@link #getQuote}: a downstream 404
+     * becomes {@link InventoryNotFoundException} (HTTP 404); any other 4xx, any 5xx, and
+     * connect/read timeouts become {@link ServiceUnavailableException} (HTTP 503), so orders-service
+     * never leaks a raw 500 from this probe.</p>
+     */
+    public void verifyProductExists(Long productId) {
+        String url = marketplaceBaseUrl + "/api/products/{productId}";
+        try {
+            // 200 body (the product JSON) is discarded; a 404 throws HttpClientErrorException.NotFound.
+            restTemplate.getForObject(url, String.class, productId);
+        } catch (HttpClientErrorException.NotFound e) {
+            throw new InventoryNotFoundException("No such product: productId=" + productId, e);
+        } catch (HttpClientErrorException e) {
+            // Non-404 4xx (e.g. 401/403 on shared-token misconfiguration): fail fast as 503 rather
+            // than leaking a raw 500 (consistent with the other client methods).
+            throw new ServiceUnavailableException(
+                    "marketplace-service returned unexpected " + e.getStatusCode()
+                            + " while verifying productId=" + productId, e);
+        } catch (HttpServerErrorException e) {
+            throw new ServiceUnavailableException(
+                    "marketplace-service unavailable while verifying productId=" + productId, e);
+        } catch (ResourceAccessException e) {
+            // Connect/read timeout (bounded by RestTemplateConfig) or other I/O failure.
+            throw new ServiceUnavailableException(
+                    "marketplace-service unreachable/timed out while verifying productId=" + productId, e);
+        }
+    }
 }

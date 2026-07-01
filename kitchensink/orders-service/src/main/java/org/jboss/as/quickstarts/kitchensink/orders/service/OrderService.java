@@ -66,8 +66,30 @@ public class OrderService {
 
     // ----- cart operations -----
 
-    @Transactional
+    /**
+     * Adds a product to the member's draft cart.
+     *
+     * <p><b>Product-existence validation (QA fix).</b> The {@code order_draft_items.product_id}
+     * column is a foreign key onto {@code products(id)} (db/01_schema.sql). Persisting a draft row
+     * with an unknown {@code productId} therefore trips that FK and surfaces as a generic HTTP 500
+     * ({@code DataIntegrityViolationException} / {@code PSQLException}) — an internal database error
+     * driven by ordinary invalid client input. To close that gap we first validate the product with
+     * marketplace-service (the catalog's system of record) via {@link MarketplaceClient#verifyProductExists};
+     * an unknown product surfaces as {@link org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException}
+     * (HTTP 404) BEFORE any row is written. orders-service cannot import marketplace types, so this
+     * cross-service check is HTTP-only through the thin client.</p>
+     *
+     * <p><b>Intentionally NON-transactional.</b> The cross-service HTTP probe must run OUTSIDE any
+     * transaction (transaction-vs-HTTP ordering, §0.7.2) so a DB connection is never held across a
+     * network round-trip. The subsequent single {@code save} is itself atomic (Spring Data's
+     * {@code SimpleJpaRepository.save} is {@code @Transactional}), so no method-level boundary is
+     * required here.</p>
+     */
     public void addToCart(Long memberId, Long productId, int quantity) {
+        // Guard: reject an unknown productId as a clean 404 before touching the database, so the
+        // products(id) foreign key is never violated (which would otherwise leak a 500).
+        marketplaceClient.verifyProductExists(productId);
+
         OrderDraftItem item = new OrderDraftItem();
         item.setMemberId(memberId);
         item.setProductId(productId);

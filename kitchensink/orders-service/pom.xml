@@ -36,6 +36,25 @@
         dependency set. It is a 3.x feature generation and requires Java 17 — matching the
         target runtime.
 
+        SECURITY NOTE — CVE-2026-54515 / GHSA-5jmj-h7xm-6q6v (jackson-databind), reviewed 2026-07-01.
+        The Jackson databind release managed by this 3.5.16 BOM (com.fasterxml.jackson.core:jackson-
+        databind:2.21.4) is flagged for a case-insensitive-deserialization bypass (CWE-915, CVSS ~5.3
+        Medium). It is pinned deliberately as an ACCEPTED, COMPENSATED risk:
+          (1) NO FIX IS PUBLISHED YET: the patched lines (2.18.9 / 2.21.5 / 2.22.1) are absent from
+              Maven Central as of this review (verified HTTP 404); every currently-published
+              com.fasterxml 2.x release sits inside an affected range, and there is no Spring Boot
+              3.5.x newer than 3.5.16. Overriding jackson to a patched line would fail the build
+              (unresolvable), and Spring Boot 4.x / Jackson 3.x would violate the AAP "Spring Boot 3.x"
+              target — so remediation is externally blocked on upstream publishing the artifact.
+          (2) COMPENSATING CONTROL: the vulnerable path is unreachable here. The bypass needs
+              @JsonFormat(with = Feature.ACCEPT_CASE_INSENSITIVE_PROPERTIES) together with
+              @JsonIgnoreProperties; a repository-wide scan confirms NONE of the three services use
+              @JsonIgnoreProperties, ACCEPT_CASE_INSENSITIVE_PROPERTIES, @JsonFormat, or a custom
+              ObjectMapper — every DTO uses default, case-sensitive binding — so exploitability is nil.
+          (3) REMEDIATION TRIGGER: when a patched Jackson (>= 2.21.5 on the 2.21 line) or the first
+              Spring Boot 3.5.17+ that manages it reaches Central, bump this parent version (preferred)
+              or add a temporary jackson-bom override, then delete this note.
+
         The empty <relativePath/> is REQUIRED so Maven resolves spring-boot-starter-parent from
         the repository rather than treating the sibling `../pom.xml` (the kitchensink aggregator)
         as this module's parent.
