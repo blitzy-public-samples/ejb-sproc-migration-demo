@@ -213,4 +213,47 @@ class OrderServiceIT {
         // @Transactional submit rolls back: the lifetime-spend increment must never have been attempted.
         verify(usersClient, never()).incrementMemberTotalSpend(anyLong(), any());
     }
+
+    @Test
+    void testSubmitOrderAppliesExpediteMultiplier() {
+        // Companion to testSubmitOrderAccumulatesProductWeightForShipping (which submits the SAME cart
+        // with expedite=false and asserts 14.25). Product 5 weighs 3.00 lb each; qty 5 -> 15.00 lb;
+        // ZIP 27601 -> Southeast zone @ 0.95/lb, so the un-expedited base is
+        // GREATEST(5.99, 0.95 * 15.00) = 14.25. Submitting with expedite=TRUE must apply the x2.5
+        // surcharge AFTER the floor (AAP §0.6.1): 14.25 x2.5 = 35.625 -> 35.63. Pairing the two tests
+        // (14.25 vs 35.63) proves the expedite multiplier is exactly x2.5 and is exercised end-to-end
+        // through the order-submit path — the coverage gap flagged for the shipping expedite multiplier.
+        when(marketplaceClient.getProductWeight(5L)).thenReturn(new BigDecimal("3.00"));
+        orderService.addToCart(TEST_MEMBER_ID, 5L, 5);
+
+        Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, true);
+
+        Order order = orderRepository.findById(orderId).orElseThrow();
+        assertEquals(0, new BigDecimal("35.63").compareTo(order.getShippingCost()),
+                "expedited shipping must be the un-expedited base (0.95/lb * 15.00 lb = 14.25) x2.5 = 35.63");
+    }
+
+    @Test
+    void testPreviewAndSubmitProduceIdenticalFigures() {
+        // Dual-path parity invariant (AAP §0.6.3): previewOrder (non-transactional) and submitOrder
+        // (@Transactional) share the single private orchestrateOrder routine, so for an identical cart
+        // the subtotal/discount/shipping/total figures MUST be equal. This asserts that equality
+        // explicitly (previously only guaranteed structurally). Same member (2 -> SILVER), same ZIP,
+        // same expedite flag, and the preview does not mutate the cart, so submit sees the same lines.
+        orderService.addToCart(TEST_MEMBER_ID, 1L, 5);
+        orderService.addToCart(TEST_MEMBER_ID, 3L, 10);
+
+        OrderService.OrderPreview preview = orderService.previewOrder(TEST_MEMBER_ID, TEST_ZIP, false);
+        Long orderId = orderService.submitOrder(TEST_MEMBER_ID, TEST_ZIP, false);
+        Order submitted = orderRepository.findById(orderId).orElseThrow();
+
+        assertEquals(0, preview.getSubtotal().compareTo(submitted.getSubtotal()),
+                "preview and submit must compute the identical subtotal");
+        assertEquals(0, preview.getDiscountAmount().compareTo(submitted.getDiscountAmount()),
+                "preview and submit must compute the identical discount");
+        assertEquals(0, preview.getShippingCost().compareTo(submitted.getShippingCost()),
+                "preview and submit must compute the identical shipping cost");
+        assertEquals(0, preview.getTotal().compareTo(submitted.getTotal()),
+                "preview and submit must compute the identical total");
+    }
 }

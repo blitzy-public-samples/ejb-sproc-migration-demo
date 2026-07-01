@@ -122,4 +122,42 @@ class DiscountServiceIT {
         assertTrue(base.subtract(discount).compareTo(base) < 0,
                 "base minus discount should be strictly less than base");
     }
+
+    @Test
+    void testSilverMemberDiscountIsFivePercent() {
+        // Member 2 -> SILVER (stubbed in setUp). Completes the tier-rate coverage alongside the
+        // existing BRONZE (2%) and GOLD (8%) tests. ROUND(100.00 * 0.05, 2) = 5.00.
+        BigDecimal discount = discountService.calculateDiscount(2L, new BigDecimal("100.00"));
+
+        assertEquals(0, new BigDecimal("5.00").compareTo(discount),
+                "SILVER discount on 100.00 should be 5.00 (5%)");
+    }
+
+    @Test
+    void testPlatinumMemberDiscountIsTwelvePercent() {
+        // Override the setUp stub for member 1 to PLATINUM (Contract 2 supplies the tier over HTTP;
+        // no member row is read). Reusing seeded member id 1 keeps the discount_audit.member_id FK
+        // satisfied. ROUND(100.00 * 0.12, 2) = 12.00 — the highest tier's 12% rate, previously
+        // unasserted.
+        when(usersClient.getMemberTier(1L)).thenReturn("PLATINUM");
+
+        BigDecimal discount = discountService.calculateDiscount(1L, new BigDecimal("100.00"));
+
+        assertEquals(0, new BigDecimal("12.00").compareTo(discount),
+                "PLATINUM discount on 100.00 should be 12.00 (12%)");
+    }
+
+    @Test
+    void testUnknownTierDefaultsToBronzeRate() {
+        // Negative/robustness case: an unrecognized tier token must fall through discountPctForTier's
+        // ELSE branch to the 2% BRONZE-equivalent rate (faithful to the stored procedure's CASE ...
+        // ELSE). Override seeded member 3's stubbed tier to an unknown value (FK still satisfied by
+        // member id 3). ROUND(100.00 * 0.02, 2) = 2.00.
+        when(usersClient.getMemberTier(3L)).thenReturn("UNKNOWN");
+
+        BigDecimal discount = discountService.calculateDiscount(3L, new BigDecimal("100.00"));
+
+        assertEquals(0, new BigDecimal("2.00").compareTo(discount),
+                "an unknown tier must map to the 2% BRONZE-equivalent rate (procedure ELSE branch)");
+    }
 }

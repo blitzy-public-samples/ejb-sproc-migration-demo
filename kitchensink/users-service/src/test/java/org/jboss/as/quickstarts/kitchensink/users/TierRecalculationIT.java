@@ -146,6 +146,46 @@ class TierRecalculationIT {
     }
 
     /**
+     * Scenario 3b (PLATINUM threshold): rolling spend exactly 5000.00 sits on the {@code >= 5000}
+     * PLATINUM boundary and must resolve to PLATINUM. This is the missing high-tier driver: without
+     * it the {@code determineTier} PLATINUM return branch is never taken (the existing tests peak at
+     * 3000, i.e. GOLD), so a regression to {@code PLATINUM_THRESHOLD} or the returned literal would
+     * go undetected.
+     */
+    @Test
+    void testMemberUpgradesToPlatinum() {
+        Member member = persistMember("BRONZE", BigDecimal.ZERO);
+        when(ordersClient.getNinetyDaySpend(member.getId())).thenReturn(new BigDecimal("5000.00"));
+
+        tierRecalculationService.triggerRecalculation();
+
+        Member updated = memberRepository.findById(member.getId()).orElseThrow();
+        assertEquals("PLATINUM", updated.getTier(),
+                "Member with $5000 90-day rolling spend (>= the 5000 PLATINUM threshold) should be "
+                        + "upgraded to PLATINUM");
+    }
+
+    /**
+     * Scenario 3c (PLATINUM lower boundary): rolling spend 4999.99 is one cent BELOW the 5000
+     * threshold and must resolve to GOLD (the {@code >= 2000} band), NOT PLATINUM. Paired with
+     * {@link #testMemberUpgradesToPlatinum()} this pins the exact {@code >= 5000} boundary so an
+     * off-by-a-threshold regression (e.g. changing 5000 to 50000, or flipping {@code >=} to
+     * {@code >}) is caught.
+     */
+    @Test
+    void testPlatinumBoundaryJustBelowRemainsGold() {
+        Member member = persistMember("BRONZE", BigDecimal.ZERO);
+        when(ordersClient.getNinetyDaySpend(member.getId())).thenReturn(new BigDecimal("4999.99"));
+
+        tierRecalculationService.triggerRecalculation();
+
+        Member updated = memberRepository.findById(member.getId()).orElseThrow();
+        assertEquals("GOLD", updated.getTier(),
+                "Member with $4999.99 90-day rolling spend (just below the 5000 PLATINUM threshold) "
+                        + "should be GOLD, not PLATINUM");
+    }
+
+    /**
      * Scenario 4 (lifetime-vs-rolling proof): member starts GOLD with a high lifetime totalSpend,
      * but the 90-day ROLLING spend is zero -> drops to BRONZE. The lifetime total is irrelevant.
      */

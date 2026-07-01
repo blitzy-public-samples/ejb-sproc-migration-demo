@@ -3,6 +3,7 @@ package org.jboss.as.quickstarts.kitchensink.marketplace;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
@@ -205,5 +206,44 @@ class VendorSelectionServiceIT {
         // is Source-A score-ranked rather than cheapest-first (review C1).
         assertTrue(rank0.unitPrice.compareTo(rank1.unitPrice) > 0,
                 "Source-A ranking must place the pricier premium vendor ABOVE the cheaper vendor");
+    }
+
+    /**
+     * INFO-2 negative case: when a product's only vendor inventory is OUT OF STOCK
+     * ({@code quantity_available = 0}), neither the eligible-vendor pass (which requires
+     * {@code quantity_available >= quantity}) nor the cheapest-with-any-stock fallback (which
+     * requires {@code quantity_available > 0}) can select it, so {@link VendorSelectionService#selectBestVendor(Long, int)}
+     * must return {@code null}. This is the "no eligible vendor" signal that orders-service maps to
+     * {@code NoEligibleVendorException}. Complements the positive maximization/ranking cases above.
+     *
+     * <p>The fixture is additive (a fresh product + vendor + zero-stock inventory row with a unique
+     * SKU) and does not disturb the divergent or seeded rows.</p>
+     */
+    @Test
+    void testSelectBestVendorReturnsNullWhenNoVendorInStock() {
+        Product product = new Product();
+        product.setName("Out Of Stock Test Product");
+        product.setSku("OOS-TEST-SKU-VSS-IT");
+        product.setBasePrice(new BigDecimal("50.0000"));
+        product.setWeightLbs(new BigDecimal("1.0000"));
+        product.setCategory("test-fixtures");
+        product = productRepository.save(product);
+
+        Vendor vendor = new Vendor();
+        vendor.setName("Zero Stock Vendor");
+        vendor.setFulfillmentRating(new BigDecimal("4.0"));
+        vendor.setAvgShippingDays(2);
+        vendor.setContactEmail("zerostock@example.test");
+        vendor = vendorRepository.save(vendor);
+
+        VendorInventory inventory = new VendorInventory();
+        inventory.setId(new VendorInventoryId(vendor.getId(), product.getId()));
+        inventory.setMarkupPercent(new BigDecimal("5.00"));
+        inventory.setQuantityAvailable(0);
+        vendorInventoryRepository.save(inventory);
+
+        Long best = vendorSelectionService.selectBestVendor(product.getId(), 1);
+        assertNull(best,
+                "selectBestVendor must return null when the product's only vendor has zero stock");
     }
 }
