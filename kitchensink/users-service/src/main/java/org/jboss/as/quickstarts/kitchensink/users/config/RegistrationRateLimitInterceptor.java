@@ -80,15 +80,29 @@ public class RegistrationRateLimitInterceptor implements HandlerInterceptor {
     }
 
     /**
-     * Best-effort client IP: prefers the first hop in {@code X-Forwarded-For} (when behind a proxy),
-     * otherwise the direct remote address.
+     * Rate-limiting client key: the direct TCP peer address ({@link HttpServletRequest#getRemoteAddr()}).
+     *
+     * <p><b>Trust boundary (CWE-348 hardening).</b> This service runs on embedded Tomcat with NO trusted
+     * reverse proxy in front of it, and {@code server.forward-headers-strategy=none} is pinned in
+     * {@code application.properties} (which prevents Spring Boot from auto-installing Tomcat's RemoteIp
+     * valve on a detected cloud platform and thereby keeps {@code getRemoteAddr()} equal to the true TCP
+     * peer). The {@code X-Forwarded-For} header is therefore entirely client-controlled and MUST NOT be
+     * used to identify the client here. An earlier revision keyed on the first {@code X-Forwarded-For}
+     * hop; because a direct attacker can set an arbitrary — and per-request different — value, that made
+     * every spoofed value look like a distinct client and reset the per-window counter, defeating the
+     * limiter. Keying strictly on the kernel-observed peer address, which a direct client cannot forge,
+     * closes that bypass while preserving identical behavior for legitimate direct clients. Both defenses
+     * are required and independent: the {@code none} strategy stops the header from rewriting
+     * {@code getRemoteAddr()}, and reading only {@code getRemoteAddr()} here stops the (now pass-through)
+     * header from being used as the key.</p>
+     *
+     * <p>If this service is later deployed behind a trusted reverse proxy and per-original-client
+     * limiting is required, restore forwarded-header support the correct way — set
+     * {@code server.forward-headers-strategy=framework} (or register a {@code ForwardedHeaderFilter})
+     * with a trusted-proxy allowlist so the container resolves {@code getRemoteAddr()} from validated
+     * hops — rather than reading the raw header in this interceptor.</p>
      */
     private static String clientIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            int comma = forwarded.indexOf(',');
-            return (comma > 0 ? forwarded.substring(0, comma) : forwarded).trim();
-        }
         String remote = request.getRemoteAddr();
         return remote != null ? remote : "unknown";
     }
