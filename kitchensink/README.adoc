@@ -188,15 +188,25 @@ lives in `orders-service`.
 [source,http]
 ----
 GET {orders.base-url}/internal/members/{memberId}/spend?days={days}
+X-Internal-Api-Key: {INTERNAL_API_KEY}
 
 200 OK   -> {"totalSpend":2750.00}
+401      -> {"error":"Unauthorized"}   (missing or invalid X-Internal-Api-Key)
 404      -> BigDecimal.ZERO
 5xx      -> ServiceUnavailableException
 ----
 
+This endpoint is exposed under `/internal` because it is consumed only by another service, not by
+the public frontend. Unlike the public `/api/**` contracts (1 and 2), which are reachable without
+authentication, the `/internal/**` channel is guarded by a shared-secret filter: every request
+must carry an `X-Internal-Api-Key` header whose value equals the server's `internal.api-key`
+(sourced from the `INTERNAL_API_KEY` environment variable). The filter *fails closed* — if
+`INTERNAL_API_KEY` is unset or blank, or the header is missing or does not match, the request is
+rejected with `401 {"error":"Unauthorized"}`. The `users-service` consumer sends this header
+automatically on the tier-recalculation spend read.
+
 The producer DTO `MemberSpendResponse` lives in `orders-service`; the consumer DTO
-`MemberSpendDto` lives in `users-service`. This endpoint is exposed under `/internal` because it
-is consumed only by another service, not by the public frontend.
+`MemberSpendDto` lives in `users-service`.
 
 == 5. Stored-procedure to Java parity
 
@@ -282,6 +292,9 @@ Tooling required to build the project:
 * *JDK 17* (Eclipse Temurin) — the Spring Boot 3.x baseline. Do not use Java 21 / Spring Boot 4.x.
 * *Apache Maven 3.9* (3.6.0+ is the documented minimum).
 * *PostgreSQL 16* — the shared database (see Section 7).
+* *Docker* — required for the Testcontainers-backed integration tests that `mvn clean install`
+  (and `mvn verify`) run: each `*IT` test starts an ephemeral `postgres:16` container. Without a
+  running Docker daemon the integration-test phase fails (see Section 8).
 * *Node.js 20* — required only for the Playwright end-to-end suite under `e2e/`.
 
 Build all three modules from the `kitchensink/` directory:
@@ -317,11 +330,20 @@ Java application never calls them.
 
 === Start each service
 
-Run each module's executable JAR (each starts an embedded Tomcat on its own port and context
-path):
+Each service reads its datasource credentials from the environment — no secrets are committed to
+`application.properties` (CWE-798), so `spring.datasource.username` / `spring.datasource.password`
+resolve from `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD`. These two variables must
+be exported before launching, or the service fails to start (Spring passes the unresolved
+placeholder as the DB username and PostgreSQL rejects the login). Set them to the credentials of
+your local `kitchensink` database (for example `postgres` / `postgres`), then run each module's
+executable JAR (each starts an embedded Tomcat on its own port and context path):
 
 [source,bash]
 ----
+# Datasource credentials are read from the environment (no committed secrets).
+export SPRING_DATASOURCE_USERNAME=postgres
+export SPRING_DATASOURCE_PASSWORD=postgres
+
 java -jar marketplace-service/target/*.jar   # http://localhost:8081/marketplace
 java -jar orders-service/target/*.jar         # http://localhost:8082/orders
 java -jar users-service/target/*.jar          # http://localhost:8083/users
@@ -378,11 +400,14 @@ fixtures and are never invoked by the code under test. The container's JDBC URL 
 Spring via `@DynamicPropertySource`. Cross-service HTTP calls are stubbed with
 `MockRestServiceServer` / WireMock so a service can be tested in isolation.
 
-Run the Java test suite from `kitchensink/`:
+Run the Java integration-test suite from `kitchensink/`. The `*IT` tests are bound to the Maven
+Failsafe plugin (`integration-test` / `verify` goals), so use `mvn verify` — a plain `mvn test`
+runs Surefire only and executes *none* of them. A running Docker daemon is required (Testcontainers
+starts an ephemeral `postgres:16` per test):
 
 [source,bash]
 ----
-mvn test
+mvn verify
 ----
 
 Parity assertions enforced by the integration tests:
@@ -417,13 +442,15 @@ Each service ships with a multi-stage `Dockerfile` that builds with Maven and ru
 * *Build stage* — `maven:3.9-eclipse-temurin-17` compiles the module and produces the executable JAR.
 * *Runtime stage* — `eclipse-temurin:17-jre-alpine` runs the JAR.
 
-Build a service image (run from `kitchensink/`):
+Each `Dockerfile`'s `COPY` paths are relative to the aggregator directory (the child POMs inherit
+from the aggregator parent), so the build *context* must be `kitchensink/` and the Dockerfile is
+selected with `-f`. Build a service image (run from `kitchensink/`):
 
 [source,bash]
 ----
-docker build -t net32/marketplace-service marketplace-service
-docker build -t net32/orders-service     orders-service
-docker build -t net32/users-service      users-service
+docker build -f marketplace-service/Dockerfile -t net32/marketplace-service .
+docker build -f orders-service/Dockerfile     -t net32/orders-service .
+docker build -f users-service/Dockerfile       -t net32/users-service .
 ----
 
 === Continuous integration
