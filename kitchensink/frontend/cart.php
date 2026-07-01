@@ -40,13 +40,13 @@ if ($zip !== '') {
 require_once __DIR__ . '/includes/header.php';
 ?>
 
-<?php if ($message): ?><div class="alert alert-success"><?php echo htmlspecialchars($message); ?></div><?php endif; ?>
-<?php if ($error):   ?><div class="alert alert-error"><?php echo htmlspecialchars($error); ?></div><?php endif; ?>
+<?php if ($message): ?><div class="alert alert-success" data-testid="alert-success"><?php echo htmlspecialchars($message); ?></div><?php endif; ?>
+<?php if ($error):   ?><div class="alert alert-error" data-testid="alert-error"><?php echo htmlspecialchars($error); ?></div><?php endif; ?>
 
 <h2 style="margin-bottom:20px;">Your Cart</h2>
 
 <?php if ($preview && !empty($preview['items'])): ?>
-<table style="margin-bottom:24px;">
+<table style="margin-bottom:24px;" data-testid="cart-table">
     <thead>
         <tr>
             <th>Product ID</th>
@@ -59,7 +59,7 @@ require_once __DIR__ . '/includes/header.php';
     </thead>
     <tbody>
         <?php foreach ($preview['items'] as $item): ?>
-        <tr>
+        <tr data-testid="cart-row">
             <td><?php echo (int)$item['productId']; ?></td>
             <td><?php echo (int)$item['vendorId']; ?></td>
             <td><?php echo (int)$item['quantity']; ?></td>
@@ -69,7 +69,7 @@ require_once __DIR__ . '/includes/header.php';
                 <form method="POST" style="display:inline;">
                     <input type="hidden" name="remove_product_id" value="<?php echo (int)$item['productId']; ?>">
                     <input type="hidden" name="zip" value="<?php echo htmlspecialchars($zip); ?>">
-                    <button type="submit" class="btn btn-danger" style="padding:4px 10px; font-size:0.8rem;">Remove</button>
+                    <button type="submit" class="btn btn-danger" style="padding:4px 10px; font-size:0.8rem;" data-testid="cart-remove">Remove</button>
                 </form>
             </td>
         </tr>
@@ -78,20 +78,28 @@ require_once __DIR__ . '/includes/header.php';
 </table>
 
 <!-- Order summary -->
-<div class="card" style="max-width:380px; margin-bottom:24px;">
+<div class="card" style="max-width:380px; margin-bottom:24px;" data-testid="order-summary">
     <h3 style="margin-bottom:14px;">Order Summary</h3>
     <table style="box-shadow:none; background:transparent;">
-        <tr><td>Subtotal</td><td class="price"><?php echo format_currency($preview['subtotal']); ?></td></tr>
-        <tr><td>Discount</td><td class="price" style="color:#27ae60;">- <?php echo format_currency($preview['discountAmount']); ?></td></tr>
-        <tr><td>Shipping<?php echo $expedite ? ' (Expedited)' : ''; ?></td><td class="price"><?php echo format_currency($preview['shippingCost']); ?></td></tr>
+        <tr><td>Subtotal</td><td class="price" data-testid="cart-subtotal"><?php echo format_currency($preview['subtotal']); ?></td></tr>
+        <tr><td>Discount</td><td class="price" style="color:#27ae60;" data-testid="cart-discount">- <?php echo format_currency($preview['discountAmount']); ?></td></tr>
+        <tr><td>Shipping<?php echo $expedite ? ' (Expedited)' : ''; ?></td><td class="price" data-testid="cart-shipping"><?php echo format_currency($preview['shippingCost']); ?></td></tr>
         <tr style="border-top:2px solid #1a3a5c;">
             <td><strong>Total</strong></td>
-            <td class="price" style="font-size:1.1rem;"><strong><?php echo format_currency($preview['total']); ?></strong></td>
+            <td class="price" style="font-size:1.1rem;" data-testid="cart-total"><strong><?php echo format_currency($preview['total']); ?></strong></td>
         </tr>
     </table>
 </div>
-<?php elseif ($preview): ?>
-    <p style="color:#888; margin-bottom:20px;">Your cart is empty or all items have no available vendors.</p>
+<?php elseif ($zip !== ''): ?>
+    <!--
+      Empty-cart / non-payable state (Issue 3 frontend completion).
+      With the empty-cart backend fix, GET .../preview now returns HTTP 400 for an
+      empty cart, so api_get() yields null ($preview === null). Keying the empty-state
+      branch off the submitted ZIP (rather than a truthy $preview) guarantees the
+      empty-cart message still renders after a shipping-estimate request. No order
+      summary and no checkout link render in this state, so the cart is non-payable.
+    -->
+    <p style="color:#888; margin-bottom:20px;" data-testid="cart-empty">Your cart is empty. Add products from the catalog before requesting a shipping estimate.</p>
 <?php endif; ?>
 
 <!-- Preview / shipping form -->
@@ -100,12 +108,12 @@ require_once __DIR__ . '/includes/header.php';
     <form method="GET" id="previewForm">
         <label for="zip">Destination ZIP Code</label>
         <input type="text" id="zip" name="zip" maxlength="5" value="<?php echo htmlspecialchars($zip); ?>"
-               placeholder="e.g. 27601">
+               placeholder="e.g. 27601" data-testid="cart-zip">
         <label style="display:flex; align-items:center; gap:8px; font-weight:normal; margin-bottom:14px;">
             <input type="checkbox" name="expedite" value="1" <?php echo $expedite ? 'checked' : ''; ?>
-                   style="width:auto; margin:0;"> Expedited shipping (2.5x rate)
+                   style="width:auto; margin:0;" data-testid="cart-expedite"> Expedited shipping (2.5x rate)
         </label>
-        <button type="submit" class="btn btn-primary">Preview Order</button>
+        <button type="submit" class="btn btn-primary" data-testid="cart-preview-submit">Preview Order</button>
     </form>
 </div>
 
@@ -117,7 +125,7 @@ document.getElementById('zip').addEventListener('change', function() {
     if (zip.length !== 5) return;
     const expedite = document.querySelector('[name="expedite"]').checked ? 'true' : 'false';
     // Fetch: GET /api/orders/cart/{memberId}/preview?zip={zip}&expedite={bool}
-    fetch(`<?php echo API_BASE_URL; ?>/orders/cart/<?php echo (int)$memberId; ?>/preview?zip=${encodeURIComponent(zip)}&expedite=${expedite}`, {
+    fetch(`<?php echo ORDERS_API_URL; ?>/orders/cart/<?php echo (int)$memberId; ?>/preview?zip=${encodeURIComponent(zip)}&expedite=${expedite}`, {
         headers: { 'Accept': 'application/json' }
     })
     .then(r => r.ok ? r.json() : null)
@@ -132,7 +140,7 @@ document.getElementById('zip').addEventListener('change', function() {
 
 <?php if ($preview && !empty($preview['items'])): ?>
 <a href="/frontend/checkout.php?zip=<?php echo urlencode($zip); ?>&expedite=<?php echo $expedite ? '1' : '0'; ?>"
-   class="btn btn-success">Proceed to Checkout</a>
+   class="btn btn-success" data-testid="cart-checkout-link">Proceed to Checkout</a>
 <?php endif; ?>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

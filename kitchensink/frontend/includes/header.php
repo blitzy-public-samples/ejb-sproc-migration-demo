@@ -18,6 +18,13 @@ $tierColor = $tierBadgeColors[$currentMemberTier] ?? '#cd7f32';
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?php echo htmlspecialchars(APP_NAME); ?></title>
+    <!--
+      Inline SVG data-URI favicon (Issue 11). Providing an explicit icon stops the
+      browser from auto-requesting /favicon.ico (which previously 404'd and produced
+      console/network noise) without adding a static asset to the document root.
+      A navy rounded square with a white "N" matches the Net32 header branding.
+    -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='6'%20fill='%231a3a5c'/%3E%3Ctext%20x='16'%20y='23'%20font-size='20'%20text-anchor='middle'%20fill='%23ffffff'%20font-family='Segoe%20UI,Arial,sans-serif'%20font-weight='700'%3EN%3C/text%3E%3C/svg%3E">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f6f9; color: #333; }
@@ -46,27 +53,102 @@ $tierColor = $tierBadgeColors[$currentMemberTier] ?? '#cd7f32';
         label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 0.9rem; }
         input, select { width: 100%; padding: 8px 12px; border: 1px solid #ccc; border-radius: 5px; font-size: 0.95rem; margin-bottom: 14px; }
         .price { font-weight: 700; color: #1a3a5c; }
+
+        /*
+         * Accessible keyboard focus indicator (Issue 8). :focus-visible only paints
+         * for keyboard / assistive-tech focus, so mouse interactions on desktop are
+         * visually unchanged while keyboard users get a clear high-contrast outline.
+         */
+        a:focus-visible,
+        button:focus-visible,
+        input:focus-visible,
+        select:focus-visible,
+        .btn:focus-visible {
+            outline: 3px solid #ffd700;
+            outline-offset: 2px;
+        }
+
+        /*
+         * Responsive treatment for tablet / mobile (Issues 7 & 8).
+         *
+         * Issue 7 — eliminate horizontal overflow and the clipped fixed header:
+         *   - The header switches from a fixed 60px single flex row to a stacked,
+         *     auto-height column so the brand, nav, and member info never clip.
+         *   - Wide data tables (the 6-column catalog / cart tables) become
+         *     horizontally scrollable blocks, so their intrinsic ~627px width no
+         *     longer forces the whole document to overflow past the viewport.
+         *   - The product-detail two-column grid (inline "1fr 320px") collapses to a
+         *     single column; a stylesheet !important overrides the inline declaration.
+         *
+         * Issue 8 — ensure ~44px touch targets:
+         *   - Nav links and every .btn control get a 44px minimum height and are laid
+         *     out as centered inline-flex boxes, so even small-padded buttons/pills
+         *     (e.g. the catalog "Details" link) meet the recommended touch size.
+         */
+        @media (max-width: 768px) {
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                height: auto;
+                min-height: 60px;
+                padding: 12px 16px;
+                gap: 10px;
+            }
+            header .brand { font-size: 1.2rem; line-height: 1.2; }
+            nav { display: flex; flex-wrap: wrap; align-items: center; row-gap: 4px; }
+            nav a {
+                margin-left: 0;
+                margin-right: 20px;
+                min-height: 44px;
+                display: inline-flex;
+                align-items: center;
+            }
+            .member-info { gap: 10px; }
+
+            /* Wide tables scroll within the viewport instead of overflowing the page. */
+            table {
+                display: block;
+                width: 100%;
+                max-width: 100%;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            th, td { padding: 10px 12px; }
+
+            /* Collapse the product-detail grid (inline "1fr 320px") to a single column. */
+            [style*="grid-template-columns: 1fr 320px"] {
+                grid-template-columns: 1fr !important;
+            }
+
+            /* >= 44px touch targets for all buttons / category pills / .btn links. */
+            .btn {
+                min-height: 44px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+        }
     </style>
 </head>
 <body>
 <header>
     <div class="brand"><?php echo htmlspecialchars(APP_NAME); ?></div>
-    <nav>
-        <a href="/frontend/index.php">Home</a>
-        <a href="/frontend/catalog.php">Catalog</a>
-        <a href="/frontend/cart.php">Cart</a>
+    <nav data-testid="nav">
+        <a href="/frontend/index.php" data-testid="nav-home">Home</a>
+        <a href="/frontend/catalog.php" data-testid="nav-catalog">Catalog</a>
+        <a href="/frontend/cart.php" data-testid="nav-cart">Cart</a>
         <?php if ($currentMemberId): ?>
-            <a href="/frontend/checkout.php">Checkout</a>
+            <a href="/frontend/checkout.php" data-testid="nav-checkout">Checkout</a>
         <?php endif; ?>
     </nav>
     <div class="member-info">
         <?php if ($currentMemberId && $currentMemberName): ?>
-            <span><?php echo htmlspecialchars($currentMemberName); ?></span>
-            <span class="tier-badge" style="background: <?php echo $tierColor; ?>">
+            <span data-testid="member-name"><?php echo htmlspecialchars($currentMemberName); ?></span>
+            <span class="tier-badge" style="background: <?php echo $tierColor; ?>" data-testid="member-tier-badge">
                 <?php echo htmlspecialchars($currentMemberTier); ?>
             </span>
         <?php else: ?>
-            <a href="/frontend/index.php" style="color:#cce0f5;">Login</a>
+            <a href="/frontend/index.php" style="color:#cce0f5;" data-testid="nav-login">Login</a>
         <?php endif; ?>
     </div>
 </header>

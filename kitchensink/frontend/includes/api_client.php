@@ -5,13 +5,30 @@
  */
 
 /**
+ * Resolves the correct per-domain base URL for a given API path (Ambiguity A1 routing).
+ *
+ * Routes by path prefix to the owning Spring Boot service:
+ *   /products* -> marketplace-service (8081); /members* -> users-service (8083);
+ *   /orders*|/cart* -> orders-service (8082). Falls back to marketplace.
+ *
+ * @param string $path  API path beginning with '/'
+ * @return string       The per-domain base URL for this path
+ */
+function resolve_base_url(string $path): string {
+    if (str_starts_with($path, '/products')) return MARKETPLACE_API_URL;
+    if (str_starts_with($path, '/members'))  return USERS_API_URL;
+    if (str_starts_with($path, '/orders') || str_starts_with($path, '/cart')) return ORDERS_API_URL;
+    return MARKETPLACE_API_URL; // safe default (not reached by current call sites)
+}
+
+/**
  * Perform a GET request to the REST API.
  *
- * @param string $path  API path relative to API_BASE_URL (e.g. "/products")
+ * @param string $path  API path (e.g. "/products"); routed to the per-domain base URL
  * @return mixed        Decoded JSON response, or null on failure
  */
 function api_get(string $path) {
-    $url = API_BASE_URL . $path;
+    $url = resolve_base_url($path) . $path;
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -32,12 +49,12 @@ function api_get(string $path) {
 /**
  * Perform a POST request to the REST API.
  *
- * @param string $path  API path relative to API_BASE_URL
+ * @param string $path  API path; routed to the per-domain base URL
  * @param array  $data  Data to JSON-encode and POST
  * @return array        ['code' => HTTP status, 'body' => decoded response]
  */
 function api_post(string $path, array $data = []) {
-    $url     = API_BASE_URL . $path;
+    $url     = resolve_base_url($path) . $path;
     $payload = json_encode($data);
     $ch      = curl_init($url);
     curl_setopt_array($ch, [
@@ -65,11 +82,11 @@ function api_post(string $path, array $data = []) {
 /**
  * Perform a DELETE request to the REST API.
  *
- * @param string $path  API path relative to API_BASE_URL
+ * @param string $path  API path; routed to the per-domain base URL
  * @return array        ['code' => HTTP status, 'body' => decoded response]
  */
 function api_delete(string $path) {
-    $url = API_BASE_URL . $path;
+    $url = resolve_base_url($path) . $path;
     $ch  = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,

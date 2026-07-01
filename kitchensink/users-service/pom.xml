@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Parent = the kitchensink AGGREGATOR (packaging=pom), NOT spring-boot-starter-parent
+        directly. The aggregator declares spring-boot-starter-parent:3.5.16 as ITS parent, so
+        the Spring Boot BOM (which centrally governs the versions of every Spring Boot starter,
+        the PostgreSQL JDBC driver, and the Testcontainers artifacts declared below) is inherited
+        transitively through the aggregator. The Java 17 baseline is likewise inherited — this
+        module therefore declares no <properties>, no <dependencyManagement>, and no java.version.
+
+        <relativePath> points one directory up to the aggregator POM that lists this module
+        (<module>users-service</module>).
+    -->
+    <parent>
+        <groupId>org.jboss.as.quickstarts</groupId>
+        <artifactId>kitchensink</artifactId>
+        <version>8.0.0.GA</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!--
+        Module coordinates. groupId (org.jboss.as.quickstarts) and version (8.0.0.GA) are
+        inherited from the aggregator parent and are intentionally NOT redeclared. This module
+        is built as an executable Spring Boot JAR — never a WAR.
+    -->
+    <artifactId>users-service</artifactId>
+    <packaging>jar</packaging>
+
+    <name>users-service</name>
+    <description>Net32 Dental Supply — Users/Identity microservice (Spring Boot 3.x); owns the member domain and the nightly tier-recalculation job</description>
+
+    <!--
+        All versions below are BOM-managed via the inherited spring-boot-starter-parent:3.5.16
+        (no explicit <version> tags). Cross-domain boundary rule (AAP §0.7.2): this module
+        declares NO compile-scope dependency on marketplace-service or orders-service (or any
+        sibling module). The only cross-domain channel is the HTTP OrdersClient gateway, whose
+        transport (RestClient/RestTemplate) is provided by spring-boot-starter-web below.
+    -->
+    <dependencies>
+        <!-- REST controllers, embedded Tomcat, and RestClient/RestTemplate for the OrdersClient HTTP gateway (Contract 3). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Hibernate + Spring Data JPA repositories; replaces the hand-rolled EntityManager MemberRepository. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!-- Bean Validation (Hibernate Validator) for the retained jakarta.validation constraints on Member and the REST create flow. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- /actuator/health for CI readiness wait and Docker healthchecks. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- PostgreSQL JDBC driver (runtime only). Version BOM-managed (Spring Boot 3.5.x parent governs a compatible 42.7.x driver). -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- JUnit 5, Mockito, AssertJ, and MockRestServiceServer (used by the ITs to stub the OrdersClient HTTP call). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Ephemeral PostgreSQL for @SpringBootTest + Testcontainers integration tests (MemberRegistrationIT, TierRecalculationIT). -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- JUnit 5 integration for Testcontainers. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Produces the repackaged, self-executable Spring Boot JAR (target/*.jar) consumed
+                by the multi-stage Dockerfile. Version is managed by the inherited Spring Boot
+                parent, so none is declared here.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

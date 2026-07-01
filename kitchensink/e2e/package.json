@@ -1,0 +1,24 @@
+{
+  "name": "kitchensink-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright end-to-end tests for the Net32 Dental Supply storefront, validating that no externally consumed REST contract regressed after the Spring Boot 3.x decomposition into marketplace, orders, and users services. Drives the PHP frontend in a real browser.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "wait:health": "wait-on -t 180000 http-get://localhost:8081/marketplace/actuator/health http-get://localhost:8082/orders/actuator/health http-get://localhost:8083/users/actuator/health",
+    "pretest": "npm run wait:health",
+    "test": "playwright test",
+    "test:ci": "npm run wait:health && playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:report": "playwright show-report",
+    "install:browsers": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^20.11.0",
+    "wait-on": "^8.0.0"
+  }
+}

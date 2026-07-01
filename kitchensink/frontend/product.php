@@ -8,7 +8,13 @@ if ($productId <= 0) {
     exit;
 }
 
-$quantity  = max(1, (int)($_GET['qty'] ?? 1));
+// QA Issue 6: the quantity input auto-submits its POST form (oninput="this.form.submit()"), but the
+// selected quantity was previously read from $_GET['qty'] only, so a POST reload (no qty GET param)
+// reset it to 1 and the "Vendor Pricing for Qty" heading / vendor query stayed at qty 1. Read the
+// posted quantity first (falling back to the ?qty= GET param, then 1) so the chosen quantity is
+// preserved across the auto-submit, the vendor pricing re-queries at that quantity, and Add to Cart
+// submits the selected quantity.
+$quantity  = max(1, (int)($_POST['quantity'] ?? $_GET['qty'] ?? 1));
 $addedMsg  = '';
 $addError  = '';
 
@@ -40,30 +46,30 @@ if (!$product) {
     exit;
 }
 
-// API call: GET /api/products/{id}/vendors?quantity={qty}
-// Returns VendorPriceResult list sorted by unit price ascending
-$vendors = api_get("/products/{$productId}/vendors?quantity={$quantity}") ?? [];
+// API call: GET /api/products/{id}/vendors?qty={qty}
+// Returns VendorPriceResult list ranked by the Source-A score (best vendor first)
+$vendors = api_get("/products/{$productId}/vendors?qty={$quantity}") ?? [];
 
-// API call (if logged in): GET /api/products/{id}/price?vendorId={v}&quantity={qty}
+// API call (if logged in): GET /api/products/{id}/price?vendorId={v}&qty={qty}
 // Used to show personalised pricing — we show it per vendor row instead
 $memberId = get_current_member_id();
 
 require_once __DIR__ . '/includes/header.php';
 ?>
 
-<?php if ($addedMsg): ?><div class="alert alert-success"><?php echo htmlspecialchars($addedMsg); ?></div><?php endif; ?>
-<?php if ($addError):  ?><div class="alert alert-error"><?php echo htmlspecialchars($addError); ?></div><?php endif; ?>
+<?php if ($addedMsg): ?><div class="alert alert-success" data-testid="alert-success"><?php echo htmlspecialchars($addedMsg); ?></div><?php endif; ?>
+<?php if ($addError):  ?><div class="alert alert-error" data-testid="alert-error"><?php echo htmlspecialchars($addError); ?></div><?php endif; ?>
 
 <div style="display:grid; grid-template-columns: 1fr 320px; gap:24px; align-items:start;">
     <!-- Product details -->
-    <div class="card">
+    <div class="card" data-testid="product-detail">
         <div style="font-size:0.8rem; color:#888; text-transform:uppercase; margin-bottom:6px;">
             <?php echo htmlspecialchars($product['category'] ?? 'General'); ?>
         </div>
-        <h2 style="margin-bottom:8px;"><?php echo htmlspecialchars($product['name']); ?></h2>
-        <p style="margin-bottom:6px; color:#555;">SKU: <strong><?php echo htmlspecialchars($product['sku']); ?></strong></p>
-        <p style="margin-bottom:6px; color:#555;">Weight: <strong><?php echo htmlspecialchars($product['weightLbs'] ?? '—'); ?> lbs</strong></p>
-        <p class="price" style="font-size:1.3rem; margin-top:12px;">
+        <h2 style="margin-bottom:8px;" data-testid="product-name"><?php echo htmlspecialchars($product['name']); ?></h2>
+        <p style="margin-bottom:6px; color:#555;" data-testid="product-sku">SKU: <strong><?php echo htmlspecialchars($product['sku']); ?></strong></p>
+        <p style="margin-bottom:6px; color:#555;" data-testid="product-weight">Weight: <strong><?php echo htmlspecialchars($product['weightLbs'] ?? '—'); ?> lbs</strong></p>
+        <p class="price" style="font-size:1.3rem; margin-top:12px;" data-testid="product-base-price">
             Base price: <?php echo format_currency($product['basePrice']); ?>
         </p>
     </div>
@@ -71,13 +77,13 @@ require_once __DIR__ . '/includes/header.php';
     <!-- Add to cart -->
     <div class="card">
         <h3 style="margin-bottom:16px;">Add to Cart</h3>
-        <form method="POST">
+        <form method="POST" data-testid="add-to-cart-form">
             <label for="quantity">Quantity</label>
             <input type="number" id="quantity" name="quantity" min="1" value="<?php echo $quantity; ?>"
-                   oninput="this.form.submit()" style="margin-bottom:8px;">
+                   oninput="this.form.submit()" style="margin-bottom:8px;" data-testid="quantity-input">
             <input type="hidden" name="qty_nav" value="1">
             <?php if ($memberId): ?>
-                <button type="submit" name="add_to_cart" class="btn btn-success" style="width:100%;">
+                <button type="submit" name="add_to_cart" class="btn btn-success" style="width:100%;" data-testid="add-to-cart">
                     Add to Cart
                 </button>
             <?php else: ?>
@@ -91,13 +97,13 @@ require_once __DIR__ . '/includes/header.php';
 <div class="card" style="margin-top:24px;">
     <h3 style="margin-bottom:16px;">
         Vendor Pricing for Qty <?php echo $quantity; ?>
-        <!-- API call: GET /api/products/{id}/vendors?quantity={qty} -->
-        <!-- Returns vendors ranked by price (cheapest first) from VendorSelectionService -->
+        <!-- API call: GET /api/products/{id}/vendors?qty={qty} -->
+        <!-- Returns vendors ranked by the Source-A score (best vendor first) from VendorSelectionService -->
     </h3>
     <?php if (empty($vendors)): ?>
         <p style="color:#888;">No vendor pricing available.</p>
     <?php else: ?>
-    <table>
+    <table data-testid="vendor-table">
         <thead>
             <tr>
                 <th>Vendor</th>
@@ -108,14 +114,14 @@ require_once __DIR__ . '/includes/header.php';
         </thead>
         <tbody>
             <?php foreach ($vendors as $i => $v): ?>
-            <tr <?php echo $i === 0 ? 'style="background:#eaf5ea;"' : ''; ?>>
-                <td>
+            <tr data-testid="vendor-row" <?php echo $i === 0 ? 'style="background:#eaf5ea;"' : ''; ?>>
+                <td data-testid="vendor-name">
                     <?php echo htmlspecialchars($v['vendorName']); ?>
                     <?php if ($i === 0): ?>
                         <span style="background:#27ae60; color:#fff; font-size:0.7rem; padding:2px 7px; border-radius:10px; margin-left:6px;">Best</span>
                     <?php endif; ?>
                 </td>
-                <td class="price"><?php echo format_currency($v['unitPrice']); ?></td>
+                <td class="price" data-testid="vendor-unit-price"><?php echo format_currency($v['unitPrice']); ?></td>
                 <td><?php echo htmlspecialchars($v['fulfillmentRating']); ?> / 5.0</td>
                 <td><?php echo htmlspecialchars($v['avgShippingDays']); ?> days</td>
             </tr>
@@ -129,7 +135,7 @@ require_once __DIR__ . '/includes/header.php';
 <!-- Discount preview for logged-in members -->
 <!-- API call chain: PricingService.calculateLineTotal() + DiscountService.calculateDiscount() -->
 <!-- Shown as informational; actual discount applied at checkout via apply_customer_discount() stored proc -->
-<div class="card" style="margin-top:16px; border-left: 4px solid #ffd700;">
+<div class="card" style="margin-top:16px; border-left: 4px solid #ffd700;" data-testid="discount-message">
     <p style="color:#555; font-size:0.9rem;">
         <strong>Your <?php echo htmlspecialchars($_SESSION['member_tier']); ?> member discount</strong>
         will be applied automatically at checkout. Use the cart preview to see exact savings.

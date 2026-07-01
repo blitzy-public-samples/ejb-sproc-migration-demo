@@ -4,123 +4,102 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!--
+        Spring Boot 3.x parent BOM.
+
+        Replaces the former EAP quickstart parent. This parent mandates the Java 17
+        baseline required by Spring Boot 3.x and centrally governs the versions of every
+        Spring Boot starter, the PostgreSQL JDBC driver, and the Testcontainers artifacts
+        that the three child service modules declare — so the children never hard-pin those
+        versions themselves.
+
+        Version 3.5.16 is the latest stable Spring Boot 3.5 patch and the version proven to
+        resolve in this build environment. The empty <relativePath/> is REQUIRED: it stops
+        Maven from treating the repository-root pom.xml (the unrelated "quickstart-aggregator"
+        that also lists this module) as the parent, forcing resolution of
+        spring-boot-starter-parent from the Maven repository instead.
+    -->
     <parent>
-        <groupId>org.jboss.as.quickstarts</groupId>
-        <artifactId>jboss-eap-quickstart-parent</artifactId>
-        <version>6.0.0.redhat-00001</version>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
     </parent>
 
+    <!--
+        Coordinates retained for provenance and minimal-change. The groupId is now declared
+        explicitly because it was previously inherited from the former EAP quickstart parent.
+        The artifactId and version (8.0.0.GA) are unchanged; the three child modules inherit
+        this version.
+    -->
+    <groupId>org.jboss.as.quickstarts</groupId>
     <artifactId>kitchensink</artifactId>
     <version>8.0.0.GA</version>
-    <packaging>war</packaging>
+    <packaging>pom</packaging>
 
-    <name>JBoss EAP Quickstart: kitchensink (Net32 Augmentation)</name>
-    <description>Net32 dental supply augmentation of the kitchensink quickstart</description>
+    <name>Net32 Dental Supply — multi-service aggregator (Spring Boot 3.x)</name>
+    <description>
+        Aggregator parent for the kitchensink domain, decomposed from a single monolithic
+        WAR into three independently deployable Spring Boot 3.x microservices:
+        marketplace-service (:8081, /marketplace), orders-service (:8082, /orders), and
+        users-service (:8083, /users). Cross-service communication is HTTP-only; this
+        aggregator intentionally declares no dependencies and no inter-module compile-scope
+        coupling, enforcing the hard cross-domain boundary.
+    </description>
 
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.jboss.bom</groupId>
-                <artifactId>jboss-eap-ee-with-tools</artifactId>
-                <version>8.0.0.GA-redhat-00009</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
+    <properties>
+        <!-- Spring Boot 3.x requires Java 17. -->
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
 
-    <dependencies>
-        <!-- Jakarta EE APIs (provided by EAP) -->
-        <dependency>
-            <groupId>jakarta.enterprise</groupId>
-            <artifactId>jakarta.enterprise.cdi-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.annotation</groupId>
-            <artifactId>jakarta.annotation-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.ws.rs</groupId>
-            <artifactId>jakarta.ws.rs-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.persistence</groupId>
-            <artifactId>jakarta.persistence-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.validation</groupId>
-            <artifactId>jakarta.validation-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.ejb</groupId>
-            <artifactId>jakarta.ejb-api</artifactId>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.hibernate.validator</groupId>
-            <artifactId>hibernate-validator</artifactId>
-            <scope>provided</scope>
-        </dependency>
+    <!--
+        The three domain-bounded Spring Boot microservice modules, listed in build order.
+        Each child references this POM as its <parent>, inheriting the Java 17 baseline and
+        the Spring Boot dependency management above.
 
-        <!-- Test dependencies -->
-        <dependency>
-            <groupId>org.jboss.arquillian.junit</groupId>
-            <artifactId>arquillian-junit-container</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <scope>test</scope>
-        </dependency>
+        Boundary rule (AAP §0.7.2): no inter-module compile-scope dependency is declared
+        here or anywhere in this aggregator. Services communicate only over HTTP through their
+        thin client gateways, so the modules remain independently deployable and evolvable.
+    -->
+    <modules>
+        <module>marketplace-service</module>
+        <module>users-service</module>
+        <module>orders-service</module>
+    </modules>
 
-        <!-- Net32 augmentation: added PostgreSQL driver -->
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <version>42.7.3</version>
-            <scope>provided</scope>
-        </dependency>
-    </dependencies>
+    <!--
+        Shared build configuration inherited by ALL three child modules.
 
-    <profiles>
-        <profile>
-            <id>arq-remote</id>
-            <dependencies>
-                <dependency>
-                    <groupId>org.wildfly.arquillian</groupId>
-                    <artifactId>wildfly-arquillian-container-remote</artifactId>
-                    <scope>test</scope>
-                </dependency>
-            </dependencies>
-        </profile>
-        <profile>
-            <id>openshift</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.eclipse.jkube</groupId>
-                        <artifactId>openshift-maven-plugin</artifactId>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
+        maven-failsafe-plugin: the integration tests across every service are named *IT
+        (PricingServiceIT, VendorSelectionServiceIT, MemberRegistrationIT, TierRecalculationIT,
+        OrderServiceIT, DiscountServiceIT). Surefire deliberately ignores the *IT naming
+        convention, so without Failsafe `mvn verify` / `mvn install` only COMPILES those tests
+        and never RUNS them. Declaring the plugin here — once, at the aggregator parent — binds
+        the integration-test and verify goals for every child module uniformly, so all five+
+        integration tests execute during `verify`/`install` (and in CI). This supersedes the
+        former per-child Failsafe block that existed only in orders-service, guaranteeing the
+        marketplace-service and users-service ITs run too (review findings: marketplace-service
+        pom L68-75, users-service pom L97-108).
 
+        The plugin VERSION and the classesDirectory setting that lets @SpringBootTest run against
+        the module's compiled classes are inherited from spring-boot-starter-parent's
+        pluginManagement, so neither is restated here. Children that have no *IT tests (none
+        today) would simply find nothing to run — a harmless no-op.
+    -->
     <build>
-        <finalName>${project.artifactId}</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-war-plugin</artifactId>
-                <configuration>
-                    <failOnMissingWebXml>false</failOnMissingWebXml>
-                </configuration>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

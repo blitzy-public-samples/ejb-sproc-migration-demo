@@ -1,0 +1,12 @@
+# Node dependencies (restored deterministically via `npm ci` from package-lock.json).
+node_modules/
+
+# Playwright run artifacts.
+test-results/
+playwright-report/
+playwright/.cache/
+blob-report/
+
+# Local environment overrides.
+.env
+.env.local

@@ -1,0 +1,224 @@
+# Kitchensink CI
+#
+# Builds and integration-tests the three Spring Boot 3.x microservices that the
+# former Jakarta EE `kitchensink` WAR was decomposed into — marketplace-service
+# (:8081 /marketplace), orders-service (:8082 /orders), and users-service
+# (:8083 /users) — then runs the Playwright end-to-end suite against the live
+# services to prove that no externally consumed REST contract regressed.
+#
+# This workflow is the SOLE repository-root addition of the refactor. Every
+# artifact it references (the aggregator POM, the read-only db/*.sql seed
+# scripts, and the e2e project) lives under the `kitchensink/` subtree, so all
+# paths and working-directory values are prefixed with `kitchensink/`.
+# `actions/checkout@v4` checks out the whole repository, so they resolve from
+# the workspace root.
+name: Kitchensink CI
+
+# CI gate: run on every push and pull request (all branches — intentionally NOT
+# restricted to the doc workflow's 8.0.x branch), plus on-demand dispatch.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Keep only the latest run per ref; cancel superseded in-flight runs.
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.ref || github.run_id }}'
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Build, integration-test, and e2e
+    runs-on: ubuntu-latest
+
+    # Credentials for the EPHEMERAL postgres:16 service container below (and for
+    # the three live services that connect to it during the e2e phase). This
+    # database is created fresh for every CI run, holds only the public db/*.sql
+    # seed fixtures, is never reachable outside the job, and never contains
+    # production data. These are therefore DELIBERATELY NON-SECRET, CI-ONLY
+    # constants — NOT a production fallback. The previous
+    # `secrets.* || '<default>'` pattern was removed because defaulting a "secret"
+    # to a committed literal implies a production credential is being supplied
+    # here (CWE-798); a real deployment instead provides its own datasource
+    # credentials via deployment secrets, which is outside this CI workflow's
+    # scope. These job-level vars propagate to every `run:` step shell below; the
+    # service container re-declares the same literals because a service `env:`
+    # cannot read the job `env` context.
+    env:
+      POSTGRES_DB: kitchensink
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_ephemeral_password
+
+    # PostgreSQL backing the THREE LIVE services during the e2e phase. The
+    # @SpringBootTest + Testcontainers integration tests that run earlier (inside
+    # the Maven build) start their OWN ephemeral PostgreSQL via
+    # @DynamicPropertySource and intentionally do NOT use this service container.
+    services:
+      postgres:
+        image: postgres:16
+        # Same ephemeral CI-only credentials as the job env above (a service
+        # `env:` cannot reference the job `env` context, so the literals are
+        # repeated here rather than defaulted from secrets).
+        env:
+          POSTGRES_DB: kitchensink
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_ephemeral_password
+        ports:
+          - 5432:5432
+        # Hold the job until the database is accepting connections.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # Check out the full repository (the kitchensink/ subtree, db scripts, e2e).
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Spring Boot 3.x mandates JDK 17. `cache: maven` persists ~/.m2 across runs.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # A single Maven invocation against the aggregator POM (packaging=pom)
+      # compiles, runs the Testcontainers integration tests for, and (via
+      # spring-boot-maven-plugin) repackages all three services into
+      # kitchensink/<module>/target/<module>-8.0.0.GA.jar. The parent POM binds
+      # maven-failsafe-plugin, so every *IT across all three modules runs during
+      # `install`. The parity conformance checks (pricing 9.1692 @ qty1 and
+      # 7.7938 @ qty100; member.total_spend incremented by the order SUBTOTAL —
+      # performed by orders-service via the boundary-safe orders -> users
+      # total-spend HTTP write contract and asserted in OrderServiceIT by
+      # verifying that write; one discount_audit row per discount call) are
+      # enforced purely by these tests passing — no bespoke assertions belong in
+      # this YAML.
+      - name: Build and run integration tests (all modules)
+        run: mvn -B -ntp -f kitchensink/pom.xml clean install
+
+      # ADVISORY (non-gating) CVE scan of the service runtime base image. All three
+      # Dockerfiles run on the SAME runtime base (eclipse-temurin:17-jre-alpine), so a
+      # single scan covers the production base for every service. QA could not run a
+      # scanner locally (trivy/grype/syft/Docker Scout were unavailable), so this wires
+      # the check into CI where it CAN run. It is deliberately non-gating:
+      # `continue-on-error: true` plus `exit-code: '0'` mean a finding NEVER fails the
+      # build — the refactor's minimal-change scope excludes gating delivery on
+      # third-party base-image CVEs — but the findings surface in the job log for triage.
+      # `ignore-unfixed: true` limits output to CVEs that actually have a fix available.
+      - name: Scan runtime base image for CVEs (advisory)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: eclipse-temurin:17-jre-alpine
+          format: table
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      # psql client used to seed the live-service database below.
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Seed the postgres:16 service DB from the read-only scripts, in strict
+      # order. `-v ON_ERROR_STOP=1` fails the job on any SQL error. These three
+      # scripts are NEVER modified; the stored procedures are loaded only as
+      # legacy parity fixtures and are never invoked by the migrated services.
+      - name: Seed database (01 schema -> 02 stored procedures -> 03 seed data)
+        # Credentials come from the job-level env (sourced from secrets). psql
+        # reads the password from PGPASSWORD; user/db are passed via the inherited
+        # $POSTGRES_USER / $POSTGRES_DB shell vars. Nothing is echoed to the log.
+        run: |
+          export PGPASSWORD="$POSTGRES_PASSWORD"
+          psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f kitchensink/db/01_schema.sql
+          psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f kitchensink/db/02_stored_procedures.sql
+          psql -h localhost -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f kitchensink/db/03_seed_data.sql
+
+      # Launch the three repackaged services as background processes against the
+      # seeded DB. SPRING_DATASOURCE_* is scoped to THIS step (Spring relaxed
+      # binding maps these env vars onto spring.datasource.*) so the earlier
+      # Testcontainers build is provably unaffected. The `*.jar` glob resolves to
+      # the single Spring Boot executable jar (the `.jar.original` is excluded).
+      # marketplace (8081) and orders (8082) start before users (8083) because
+      # users fires an ApplicationReadyEvent tier recalculation that calls
+      # orders-service over HTTP.
+      - name: Start services
+        # Datasource credentials come from the job-level env (the ephemeral
+        # CI-only literals) and are exported INSIDE this step only, so the earlier
+        # Maven / Testcontainers build never sees SPRING_DATASOURCE_* (its
+        # @DynamicPropertySource ephemeral DB stays authoritative). INTERNAL_API_KEY
+        # is the shared service-to-service key guarding the /internal/** endpoints:
+        # orders-service and users-service must present the SAME value (as the
+        # X-Internal-Api-Key header) for their mutual /internal calls to
+        # authenticate — users' startup tier recalculation reads orders'
+        # /internal spend, and an order submit writes the subtotal back to users'
+        # /internal total-spend. It is an ephemeral CI-only value exported only
+        # here, so the earlier test build still resolves `internal.api-key` empty.
+        # The exec'd JVMs inherit the exported vars; nothing is echoed to the log.
+        run: |
+          export SPRING_DATASOURCE_URL="jdbc:postgresql://localhost:5432/${POSTGRES_DB}"
+          export SPRING_DATASOURCE_USERNAME="$POSTGRES_USER"
+          export SPRING_DATASOURCE_PASSWORD="$POSTGRES_PASSWORD"
+          export INTERNAL_API_KEY="ci-internal-ephemeral-key"
+          java -jar kitchensink/marketplace-service/target/*.jar > marketplace.log 2>&1 &
+          java -jar kitchensink/orders-service/target/*.jar      > orders.log      2>&1 &
+          java -jar kitchensink/users-service/target/*.jar       > users.log       2>&1 &
+
+      # Node 20 for the Playwright e2e project. The e2e project now commits a
+      # package-lock.json, so npm dependency caching is keyed off it (the lockfile
+      # lives under kitchensink/e2e, not the repo root, hence cache-dependency-path).
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: kitchensink/e2e/package-lock.json
+
+      # PHP for the storefront. Playwright's `webServer` block starts the PHP
+      # built-in server itself (php -S 127.0.0.1:8080 -d expose_php=0 -t ..
+      # ../router.php — the router returns a real 404 for unknown paths instead of
+      # the built-in server's index fallback, and expose_php=0 suppresses the
+      # X-Powered-By header); we only need PHP on the runner and must NOT start it
+      # manually or set E2E_DISABLE_WEBSERVER.
+      - name: Set up PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+
+      # Install deps deterministically from the committed lockfile (npm ci ONLY —
+      # no `|| npm install` fallback, so a drifted or missing lockfile fails the
+      # job instead of silently mutating dependencies), install the Chromium
+      # browser (+ OS deps), then run the suite. `npm test` runs pretest ->
+      # wait:health, which `wait-on`s the three Actuator health URLs (defined in
+      # e2e/package.json — not duplicated here) until UP, after which Playwright
+      # starts the PHP frontend and runs the products/members/orders specs.
+      - name: Run Playwright e2e
+        working-directory: kitchensink/e2e
+        run: |
+          npm ci
+          npm run install:browsers
+          npm test
+
+      # On failure, surface each service's stdout/stderr to diagnose a failed
+      # startup or a health-gate timeout.
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          for svc in marketplace orders users; do
+            echo "::group::${svc}.log"
+            cat "${svc}.log" || echo "(no ${svc}.log produced)"
+            echo "::endgroup::"
+          done
+
+      # Preserve the Playwright HTML report when the suite fails.
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: kitchensink/e2e/playwright-report
+          if-no-files-found: ignore
