@@ -45,6 +45,7 @@ The three services share one physical PostgreSQL database, but each Hibernate pe
 * *Maven 3.9+* — to build the multi-module reactor and repackage each service as an executable JAR.
 * *Docker* — required by the Testcontainers-based integration tests and to build the per-service container images.
 * *PostgreSQL* — a database named `kitchensink`, reachable at `localhost:5432`, holding the application schema and seed data (see the Database setup section below).
+* *`SECURITY_INTERNAL_TOKEN`* — a shared-secret environment variable required at runtime by `orders-service` and `users-service`; both *fail fast at startup* if it is unset, and all three services must be given the *same* value. `marketplace-service` does not use it. See the Running the services section below.
 
 == Database setup
 
@@ -81,6 +82,7 @@ Each service is a self-contained executable JAR. Supply the database credentials
 ----
 export DB_USERNAME=<your-db-user>
 export DB_PASSWORD=<your-db-password>
+export SECURITY_INTERNAL_TOKEN=<a-shared-secret>   # REQUIRED by orders-service & users-service; all three services must share the SAME value
 
 # marketplace-service -> http://localhost:8081/marketplace
 java -jar marketplace-service/target/marketplace-service-*.jar
@@ -92,6 +94,8 @@ java -jar orders-service/target/orders-service-*.jar
 java -jar users-service/target/users-service-*.jar
 ----
 
+`SECURITY_INTERNAL_TOKEN` is the shared secret that guards the internal service-to-service endpoints and signs the member-scoped access tokens. It is *required* by `orders-service` and `users-service`, which *fail fast at startup* (with a placeholder-resolution error) if it is unset, and every cooperating service must be given the *same* value. `marketplace-service` makes no authenticated cross-service calls and therefore does not require it — it starts with only the database credentials above.
+
 Cross-service calls are configured through `services.*.base-url` properties, whose defaults already point at the local ports and context-paths shown above:
 
 * *orders-service* calls both peers, so it reads `services.marketplace.base-url` (default `http://localhost:8081/marketplace`) and `services.users.base-url` (default `http://localhost:8083/users`).
@@ -99,6 +103,11 @@ Cross-service calls are configured through `services.*.base-url` properties, who
 * *marketplace-service* makes no outbound service calls.
 
 When the services run on different hosts, override any base URL with the matching environment variable — for example `SERVICES_MARKETPLACE_BASE_URL`, `SERVICES_USERS_BASE_URL`, or `SERVICES_ORDERS_BASE_URL`.
+
+A few further settings are optional — they have working defaults and only need to be set to override them:
+
+* `SECURITY_REGISTRATION_MAX_PER_MINUTE` (users-service; default `20`) — per-client-IP rate limit for the public member-registration endpoint.
+* `SERVICES_HTTP_CLIENT_CONNECT_TIMEOUT_MS` and `SERVICES_HTTP_CLIENT_READ_TIMEOUT_MS` (orders-service and users-service; defaults `2000` and `5000`) — outbound cross-service HTTP timeouts, in milliseconds.
 
 == Verifying the services
 
@@ -109,23 +118,27 @@ Each service exposes a Spring Boot Actuator health endpoint under its context-pa
 curl http://localhost:8081/marketplace/actuator/health
 curl http://localhost:8082/orders/actuator/health
 curl http://localhost:8083/users/actuator/health
-# each responds with: {"status":"UP"}
+# each responds with HTTP 200 and a body whose status is UP, e.g. {"status":"UP","groups":["liveness","readiness"]}
 ----
 
-The original REST endpoints are preserved, each under its service's base mapping. Example calls:
-
-NOTE: The marketplace-service product-catalog endpoint (`GET /marketplace/api/products`) is served by the marketplace producer controller (`ProductResourceRESTService`), which is delivered in the final step of the migration. Until that controller is in place, the marketplace-service still boots and its `/marketplace/actuator/health` endpoint responds `UP`, but `GET /marketplace/api/products` is not yet available. The orders-service and users-service endpoints shown below are available now.
+The original REST endpoints are preserved, each under its service's base mapping. Note that most member-scoped and administrative read endpoints — including `GET /orders/api/orders/{id}` and the `GET /users/api/members` listing — are access-controlled and return `401 Unauthorized` unless the caller is authorized; a trusted service authenticates with the shared-secret header `X-Internal-Service-Token: <SECURITY_INTERNAL_TOKEN>` (SERVICE access). Member registration (`POST /users/api/members`) is the only open, unauthenticated endpoint. The calls below are illustrative rather than exhaustive — each service exposes further domain endpoints (for example marketplace pricing, quote, and vendor ranking; orders cart, preview, and submit; and the users loyalty-tier lookup). Example calls:
 
 [source,bash]
 ----
-# marketplace-service — product catalog (available after the final marketplace producer controller is in place)
+# marketplace-service — product catalog (open; returns the seeded catalog)
 curl http://localhost:8081/marketplace/api/products
 
 # orders-service — look up an order by id
-curl http://localhost:8082/orders/api/orders/{id}
+# (SERVICE/admin authorization required; returns 401 without the token header)
+curl -H "X-Internal-Service-Token: $SECURITY_INTERNAL_TOKEN" \
+     http://localhost:8082/orders/api/orders/{id}
 
-# users-service — list members, or register a new member
-curl http://localhost:8083/users/api/members
+# users-service — list members
+# (SERVICE/admin authorization required; returns 401 without the token header)
+curl -H "X-Internal-Service-Token: $SECURITY_INTERNAL_TOKEN" \
+     http://localhost:8083/users/api/members
+
+# users-service — register a new member (open endpoint; no authorization required)
 curl -X POST http://localhost:8083/users/api/members \
      -H 'Content-Type: application/json' \
      -d '{"name":"Jane Doe","email":"jane.doe@example.com","phoneNumber":"2125551234"}'
@@ -139,7 +152,7 @@ curl -X POST http://localhost:8083/users/api/members \
 * *orders-service* — `DiscountServiceIT`, `OrderServiceIT`
 * *users-service* — `MemberRegistrationIT`, `RemoteMemberRegistrationIT`, `TierRecalculationIT`
 
-The repository-root workflow `.github/workflows/ci.yml` runs the same `mvn -B clean verify` on a Docker-enabled runner for every push and pull request.
+The repository-root workflow `.github/workflows/ci.yml` runs the same `mvn -B clean verify` on a Docker-enabled runner for every push and pull request to `main`.
 
 == Container images
 
@@ -153,6 +166,8 @@ docker run --rm -p 8081:8081 \
   -e DB_PASSWORD=<your-db-password> \
   marketplace-service
 ----
+
+When you build and run the `orders-service` and `users-service` images (mapping ports `8082` and `8083` respectively), also pass `-e SECURITY_INTERNAL_TOKEN=<a-shared-secret>` — the same value across all three services — because those two services require it at startup.
 
 The container image build skips the integration tests (they require a Docker daemon for Testcontainers, which is unavailable inside the build); test execution lives in CI instead.
 
