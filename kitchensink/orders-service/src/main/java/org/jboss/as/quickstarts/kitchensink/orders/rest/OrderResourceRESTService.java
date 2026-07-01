@@ -7,6 +7,7 @@ import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -139,5 +140,43 @@ public class OrderResourceRESTService {
     public ResponseEntity<Object> handleUnreadableBody(HttpMessageNotReadableException ex) {
         return ResponseEntity.badRequest()
                 .body("Request body is missing or malformed; productId and quantity must be numbers");
+    }
+
+    // ----- concurrency error handling (graceful 409 on a double-submit race, never a 500) -----
+
+    /**
+     * Concurrency-safe order-submission mapping -> 409 Conflict with body
+     * {@code {"error":"Cart already submitted; please retry."}}.
+     *
+     * <p><b>The race.</b> {@link #submitOrder} runs {@code OrderService.orchestrateOrder()} (all
+     * cross-service HTTP, OUTSIDE any transaction) and then persists the CONFIRMED order + items and
+     * clears the member's draft cart inside a single local {@code @Transactional} boundary
+     * ({@code OrderPersistenceService.persistConfirmedOrder}). That check-then-persist is correct for
+     * the common sequential case, but under a near-simultaneous double-submit of the SAME cart
+     * (double-click / rapid retry) both requests can finish their pre-transaction calculation before
+     * either commits. The winner persists its order and deletes the member's {@code order_draft_items}
+     * rows; the loser then attempts to delete those same (now-gone) rows and Hibernate's row-count
+     * check surfaces the stale state as {@link ObjectOptimisticLockingFailureException} (wrapping
+     * {@code org.hibernate.StaleObjectStateException}). Without a mapping this benign, retryable
+     * outcome would leak a generic HTTP 500.</p>
+     *
+     * <p><b>Integrity is preserved, not relaxed.</b> The stale-state detection is exactly what keeps
+     * the submission atomic: precisely ONE order is ever persisted per race, with no orphan
+     * {@code order_items} and no double-charge. This handler does NOT weaken the single-{@code
+     * @Transactional} atomicity guarantee (AAP &sect;0.7.1) -- it only translates the loser's outcome
+     * into a graceful 409. A client that receives this 409 can simply retry; the retry finds an empty
+     * cart and returns the graceful 400 (empty cart).</p>
+     *
+     * <p><b>Targeted, not catch-all.</b> This maps a single EXPECTED concurrency exception, mirroring
+     * the graceful-conflict pattern already used on the users-service registration edge
+     * ({@code @ExceptionHandler(DataIntegrityViolationException.class) -> 409} for the concurrent
+     * duplicate-email race). Any other unexpected error still yields Spring's default 500. The 409
+     * body uses the same {@code Map} JSON shape as the {@code submitOrder} success body
+     * ({@code {"orderId":N}}), so the surface stays consistent.</p>
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<Object> handleConcurrentSubmit(ObjectOptimisticLockingFailureException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(Map.of("error", "Cart already submitted; please retry."));
     }
 }
