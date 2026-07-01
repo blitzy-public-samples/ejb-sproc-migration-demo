@@ -5,40 +5,39 @@ import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
- * Registers the orders-service web-edge access-control interceptors.
+ * Registers the orders-service web-edge interceptors.
  *
- * <p>Two complementary interceptors are bound (both matched within the {@code /orders} context-path,
- * which Spring strips before pattern matching):</p>
+ * <p>{@link InternalServiceAuthInterceptor} is bound on {@code /internal/**} (matched within the
+ * {@code /orders} context-path, which Spring strips before pattern matching) — a service-token guard
+ * for the internal spend-read endpoint ({@code GET /internal/members/{id}/spend}), callable only by
+ * trusted peer services (users-service). That endpoint is NEW service-to-service plumbing introduced
+ * by this migration (AAP §0.6.2 Contract 3), not part of the original monolith's observable surface,
+ * so guarding it does not affect storefront continuity.</p>
  *
- * <ul>
- *   <li>{@link InternalServiceAuthInterceptor} on {@code /internal/**} — a service-token guard for the
- *       internal spend-read endpoint ({@code GET /internal/members/{id}/spend}), callable only by
- *       trusted peer services.</li>
- *   <li>{@link MemberAccessControlInterceptor} on {@code /api/orders/**} — application-specific
- *       authentication and member-ownership enforcement for the public cart/order surface
- *       (add-to-cart, remove-from-cart, preview, submit, order lookup, order history). This closes the
- *       CRITICAL authorization gap where any caller could read or mutate another member's data.</li>
- * </ul>
- *
- * <p>The {@code /actuator/**} health/metrics endpoints remain open for orchestration probes.</p>
+ * <p><b>The public cart/order surface ({@code /api/orders/**}: add-to-cart, remove-from-cart, preview,
+ * submit, order lookup, order history) is intentionally left OPEN and unauthenticated.</b> The AAP
+ * freezes the pre-existing PHP storefront as functionally unchanged (AAP §0.3.4) and mandates
+ * preserving the monolith's observable behavior exactly (AAP §0.7.1 / §0.1.1). The legacy JAX-RS order
+ * resource carried no authentication, and the demo storefront calls these endpoints anonymously
+ * (client-side demo login, no token). Gating this surface would break that mandated continuity (the
+ * entire commerce flow would return 401 to the frozen storefront), so no member-authentication
+ * interceptor is registered here. The {@code /actuator/**} health/metrics endpoints likewise remain
+ * open for orchestration probes.</p>
  */
 @Configuration
 public class InternalSecurityConfig implements WebMvcConfigurer {
 
     private final InternalServiceAuthInterceptor internalServiceAuthInterceptor;
-    private final MemberAccessControlInterceptor memberAccessControlInterceptor;
 
-    public InternalSecurityConfig(InternalServiceAuthInterceptor internalServiceAuthInterceptor,
-                                  MemberAccessControlInterceptor memberAccessControlInterceptor) {
+    public InternalSecurityConfig(InternalServiceAuthInterceptor internalServiceAuthInterceptor) {
         this.internalServiceAuthInterceptor = internalServiceAuthInterceptor;
-        this.memberAccessControlInterceptor = memberAccessControlInterceptor;
     }
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        // Service-token guard for internal (service-to-service) endpoints.
+        // Service-token guard for the internal (service-to-service) spend-read endpoint only.
+        // The public /api/orders/** cart/order surface is intentionally unauthenticated to preserve
+        // the frozen PHP storefront's continuity (AAP §0.3.4, §0.7.1) — see class javadoc.
         registry.addInterceptor(internalServiceAuthInterceptor).addPathPatterns("/internal/**");
-        // Authentication + member-ownership guard for the public cart/order surface.
-        registry.addInterceptor(memberAccessControlInterceptor).addPathPatterns("/api/orders/**");
     }
 }

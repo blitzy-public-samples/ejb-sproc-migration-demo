@@ -66,9 +66,9 @@ class MemberRegistrationIT {
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
         // security.internal.token has no default in application.properties (CWE-798 fix); supply an
-        // explicit value so the context (CallerAuthenticator / InternalServiceAuthInterceptor /
-        // OrdersClient) starts. Raise the registration rate limit far above anything this test issues
-        // so the public POST /api/members registrations are never throttled here.
+        // explicit value so the context (InternalServiceAuthInterceptor / OrdersClient) starts. Raise
+        // the registration rate limit far above anything this test issues so the public
+        // POST /api/members registrations are never throttled here.
         registry.add("security.internal.token", () -> "test-internal-token");
         registry.add("security.registration.max-per-minute", () -> "1000000");
     }

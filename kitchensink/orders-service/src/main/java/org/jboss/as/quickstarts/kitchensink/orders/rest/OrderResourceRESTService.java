@@ -18,11 +18,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 
-import org.jboss.as.quickstarts.kitchensink.orders.config.CallerIdentity;
-import org.jboss.as.quickstarts.kitchensink.orders.config.MemberAccessControlInterceptor;
 import org.jboss.as.quickstarts.kitchensink.orders.dto.AddToCartRequest;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.service.OrderService;
@@ -100,25 +97,15 @@ public class OrderResourceRESTService {
     /**
      * GET /api/orders/{orderId} - one order, or 404 if not found (legacy semantics preserved).
      *
-     * <p>Authorization: this path carries an {@code orderId} (not a {@code memberId}), so the
-     * {@link MemberAccessControlInterceptor} can only enforce that the caller is authenticated (401 if
-     * anonymous) and publishes the resolved {@link CallerIdentity}. Ownership is finished here, once
-     * the order is loaded: a MEMBER caller may read only its own orders, while a trusted SERVICE caller
-     * may read any order. A 404 (not found) is returned before the ownership check so existence is not
-     * conditioned on identity for missing orders; an authenticated non-owner of an existing order gets
-     * 403.</p>
+     * <p>This is part of the public order surface and is intentionally unauthenticated to preserve the
+     * frozen PHP storefront's continuity (AAP §0.3.4, §0.7.1): the legacy JAX-RS resource carried no
+     * authentication and returned the order (or 404) to any caller. See {@code InternalSecurityConfig}.</p>
      */
     @GetMapping("/{orderId}")
-    public ResponseEntity<Object> getOrder(@PathVariable Long orderId, HttpServletRequest request) {
+    public ResponseEntity<Object> getOrder(@PathVariable Long orderId) {
         Order order = orderService.getOrder(orderId);
         if (order == null) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Order not found: " + orderId);
-        }
-        CallerIdentity caller = (CallerIdentity) request.getAttribute(
-                MemberAccessControlInterceptor.CALLER_IDENTITY_ATTRIBUTE);
-        if (caller == null || !caller.canAccessMember(order.getMemberId())) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body("Not authorized to view order " + orderId);
         }
         return ResponseEntity.ok(order);
     }

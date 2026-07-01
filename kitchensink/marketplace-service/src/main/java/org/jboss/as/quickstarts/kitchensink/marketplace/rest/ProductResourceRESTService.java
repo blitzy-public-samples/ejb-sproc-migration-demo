@@ -58,15 +58,29 @@ public class ProductResourceRESTService {
         return productRepository.findByCategoryOrderByNameAsc(category);
     }
 
-    /** GET /api/products/{id}/vendors?qty=N - ranked vendor list; 404 if product absent. */
+    /**
+     * GET /api/products/{id}/vendors?qty=N (also accepts the legacy alias ?quantity=N) -
+     * ranked vendor list; 404 if product absent.
+     *
+     * <p>QA F9 Issue #2 continuity fix: this {@code /vendors} endpoint is a storefront-only path.
+     * The frozen PHP storefront ({@code frontend/product.php}) calls it with the pre-migration
+     * query-parameter name {@code quantity}. The AAP {@code quantity}->{@code qty} rename
+     * (§0.6.7) is scoped to the Contract&nbsp;1 {@code /price} producer only; per §0.7.1/§0.3.4
+     * the storefront's observable behavior must be preserved, so BOTH parameter names are
+     * accepted here. {@code qty} takes precedence when both are supplied; when neither is
+     * supplied the quantity defaults to 1 (matching the legacy {@code @DefaultValue("1")}).
+     */
     @GetMapping("/{id}/vendors")
     public ResponseEntity<List<VendorSelectionService.VendorPriceResult>> getVendorsForProduct(
             @PathVariable Long id,
-            @RequestParam(name = "qty", defaultValue = "1") int qty) {
+            @RequestParam(name = "qty", required = false) Integer qty,
+            @RequestParam(name = "quantity", required = false) Integer quantity) {
         if (productRepository.findById(id).isEmpty()) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok(vendorSelectionService.getVendorPricesForProduct(id, qty));
+        // Coalesce the canonical `qty` with the legacy `quantity` alias (qty wins), default 1.
+        int effectiveQty = (qty != null) ? qty : (quantity != null ? quantity : 1);
+        return ResponseEntity.ok(vendorSelectionService.getVendorPricesForProduct(id, effectiveQty));
     }
 
     /**

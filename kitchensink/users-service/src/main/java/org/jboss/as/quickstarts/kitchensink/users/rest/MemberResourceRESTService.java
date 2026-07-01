@@ -45,16 +45,17 @@ import org.jboss.as.quickstarts.kitchensink.users.service.MemberSpendService;
  * DTO directly. There are no native queries and no outbound cross-service HTTP calls here -- this is a
  * pure producer edge.</p>
  *
- * <p><b>Access control.</b> Authorization is enforced at the web edge by registered interceptors
- * (see {@code InternalSecurityConfig}), so the handler methods below stay free of inline security
- * checks:</p>
+ * <p><b>Access control.</b> Web-edge interceptors are registered in {@code InternalSecurityConfig}, so
+ * the handler methods below stay free of inline security checks:</p>
  * <ul>
- *   <li>{@code GET /api/members} (list) — SERVICE/admin only (member PII of all members);</li>
- *   <li>{@code GET /api/members/{id}} and {@code GET /api/members/{id}/tier} — the authenticated owner
- *       of that member, or a trusted SERVICE caller;</li>
+ *   <li>{@code GET /api/members} (list), {@code GET /api/members/{id}} and
+ *       {@code GET /api/members/{id}/tier} — intentionally UNAUTHENTICATED / OPEN, preserving the frozen
+ *       PHP storefront's continuity and the monolith's observable behavior exactly (AAP §0.3.4, §0.7.1);
+ *       the scope-listed {@code GET /api/members} continuity check and the orders-service peer tier read
+ *       both reach these endpoints without credentials;</li>
  *   <li>{@code POST /api/members} (register) — intentionally UNAUTHENTICATED (200-OK parity), guarded
  *       instead by a per-IP registration rate limiter;</li>
- *   <li>{@code POST /api/members/{id}/spend} — trusted SERVICE token only (unchanged).</li>
+ *   <li>{@code POST /api/members/{id}/spend} — trusted SERVICE token only (new internal GAP-3 plumbing).</li>
  * </ul>
  */
 @RestController
