@@ -8,19 +8,20 @@ $success = '';
 // Handle login form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['member_id'])) {
     $memberId = (int)$_POST['member_id'];
-    // API call: GET /api/members/{id}  (standard kitchensink endpoint)
-    // We use the member from session; for this demo we accept any valid seed member ID
-    if ($memberId >= 1 && $memberId <= 3) {
-        // Simulate fetching member details — in a full app, call /api/members/{id}
-        $memberData = [
-            1 => ['name' => 'Jane Smith',    'tier' => 'GOLD'],
-            2 => ['name' => 'Robert Torres', 'tier' => 'SILVER'],
-            3 => ['name' => 'Emily Chen',    'tier' => 'BRONZE'],
-        ];
-        set_current_member($memberId, $memberData[$memberId]['name'], $memberData[$memberId]['tier']);
-        $success = 'Logged in as ' . $memberData[$memberId]['name'] . ' (' . $memberData[$memberId]['tier'] . ')';
+    // QA Issue 4: fetch the member's REAL details from users-service (GET /api/members/{id}) instead
+    // of a hardcoded name/tier map. users-service recalculates each member's tier from 90-day rolling
+    // CONFIRMED-order spend at startup, so the tier stored in the session must come from the live API
+    // — otherwise the header badge and the checkout discount label (both read $_SESSION['member_tier'])
+    // drift from the tier the discount math actually uses. api_get('/members/{id}') routes to
+    // users-service; a non-existent member returns null (HTTP 404) and is rejected below.
+    $member = $memberId > 0 ? api_get('/members/' . $memberId) : null;
+    if (is_array($member) && isset($member['id'])) {
+        $name = isset($member['name']) ? $member['name'] : ('Member ' . $memberId);
+        $tier = isset($member['tier']) ? $member['tier'] : 'BRONZE';
+        set_current_member((int)$member['id'], $name, $tier);
+        $success = 'Logged in as ' . $name . ' (' . $tier . ')';
     } else {
-        $error = 'Invalid member ID. Use 1, 2, or 3 for demo.';
+        $error = 'Invalid member ID. Please enter an existing member ID.';
     }
 }
 

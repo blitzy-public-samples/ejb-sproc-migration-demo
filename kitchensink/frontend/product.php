@@ -8,7 +8,13 @@ if ($productId <= 0) {
     exit;
 }
 
-$quantity  = max(1, (int)($_GET['qty'] ?? 1));
+// QA Issue 6: the quantity input auto-submits its POST form (oninput="this.form.submit()"), but the
+// selected quantity was previously read from $_GET['qty'] only, so a POST reload (no qty GET param)
+// reset it to 1 and the "Vendor Pricing for Qty" heading / vendor query stayed at qty 1. Read the
+// posted quantity first (falling back to the ?qty= GET param, then 1) so the chosen quantity is
+// preserved across the auto-submit, the vendor pricing re-queries at that quantity, and Add to Cart
+// submits the selected quantity.
+$quantity  = max(1, (int)($_POST['quantity'] ?? $_GET['qty'] ?? 1));
 $addedMsg  = '';
 $addError  = '';
 

@@ -1,8 +1,10 @@
 package org.jboss.as.quickstarts.kitchensink.orders.rest;
 
+import org.jboss.as.quickstarts.kitchensink.orders.exception.EmptyCartException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.NoEligibleVendorException;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.ProductNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -36,11 +38,22 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * exceptions first and flattened them to {@code 500}, so the Contract 2 missing-member case returned
  * {@code 500} instead of the contractually required {@code 404}. The fix has two coordinated parts:
  * (1) this advice maps each domain exception to its correct status, and (2) those two handlers now
- * re-throw the three domain exceptions <em>before</em> their generic {@code catch (Exception e)} so the
+ * re-throw the domain exceptions <em>before</em> their generic {@code catch (Exception e)} so the
  * exceptions reach this advice. The generic {@code 500} fallback is preserved verbatim for every other
- * failure (empty cart, request-body type-mismatch casts, foreign-key violations, integer overflow) —
- * those remain faithful {@code 500} responses per the AAP minimal-change clause (AAP &sect;0.7.2; QA
- * INFO-1).</p>
+ * unexpected failure (request-body type-mismatch casts, integer overflow) — those remain faithful
+ * {@code 500} responses per the AAP minimal-change clause (AAP &sect;0.7.2; QA INFO-1).</p>
+ *
+ * <p><strong>Add-to-cart FK validation (QA Issue 2, MAJOR).</strong> Adding a draft cart row for an
+ * unknown member or product previously reached the database and failed with a
+ * {@code DataIntegrityViolationException} (order_draft_items FK violation), surfacing as an
+ * uncontrolled {@code 500} with FK stack traces in the logs. {@code OrderService.addToCart} now
+ * validates both foreign-key targets over HTTP before persisting and raises {@link
+ * MemberNotFoundException} / {@link ProductNotFoundException}; both map to <strong>404</strong> here.</p>
+ *
+ * <p><strong>Empty-cart consistency (QA Issue 3, MAJOR).</strong> An empty cart is no longer a
+ * {@code 500}: {@code previewOrder} and {@code submitOrder} both raise {@link EmptyCartException},
+ * mapped to a single controlled <strong>400</strong> here, so the two paths agree on empty-cart
+ * validity and the storefront can render a non-payable empty-cart state.</p>
  *
  * <p>This advice takes precedence over the {@code @ResponseStatus} self-mapping on each exception
  * (as each exception's javadoc anticipates), giving a single, central place that governs the whole
@@ -82,6 +95,36 @@ public class OrdersRestExceptionHandler {
     @ExceptionHandler(InventoryNotFoundException.class)
     public ResponseEntity<String> handleInventoryNotFound(InventoryNotFoundException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
+    }
+
+    /**
+     * Maps {@link ProductNotFoundException} (QA Issue 2: {@code addToCart} referenced a product that
+     * does not exist in the marketplace catalog) to {@code HTTP 404 NOT_FOUND}. This converts what was
+     * a raw {@code DataIntegrityViolationException} (order_draft_items product FK violation, HTTP 500)
+     * into a controlled, leakage-safe 404 raised <em>before</em> any row is persisted.
+     *
+     * @param ex the raised domain exception
+     * @return a {@code 404} response whose plain-text body is the exception's detail message
+     */
+    @ExceptionHandler(ProductNotFoundException.class)
+    public ResponseEntity<String> handleProductNotFound(ProductNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
+    }
+
+    /**
+     * Maps {@link EmptyCartException} (QA Issue 3: an order preview or submit was attempted with an
+     * empty cart) to {@code HTTP 400 BAD_REQUEST}. Both the preview and submit paths raise this same
+     * exception, so they agree on empty-cart validity instead of the previous split behavior (preview
+     * returned a misleading payable-looking 200 while submit returned an uncontrolled 500). 400 is
+     * consistent with the controller's other client-precondition failures (missing {@code zip},
+     * non-positive quantity).
+     *
+     * @param ex the raised domain exception
+     * @return a {@code 400} response whose plain-text body is the exception's detail message
+     */
+    @ExceptionHandler(EmptyCartException.class)
+    public ResponseEntity<String> handleEmptyCart(EmptyCartException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ex.getMessage());
     }
 
     /**

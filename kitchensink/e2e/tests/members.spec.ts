@@ -15,8 +15,17 @@ import { test, expect, Page } from '@playwright/test';
  * A2 resolution: register.php does not exist; the login form is embedded in index.php and logs
  * in by member ID.
  *
- * Seed authority (db/03_seed_data.sql): member 1 = Jane Smith (GOLD), member 2 = Robert Torres
- * (SILVER), member 3 = Emily Chen (BRONZE).
+ * Tier authority — startup 90-day recalculation, NOT the static seed column:
+ *   The member NAMES come from db/03_seed_data.sql (member 1 = Jane Smith, member 2 = Robert
+ *   Torres, member 3 = Emily Chen), but the effective TIER is whatever
+ *   TierRecalculationService computes, not the seed's tier column. That service runs on
+ *   ApplicationReadyEvent (and nightly at 02:00) and assigns each member a tier from their
+ *   rolling 90-day CONFIRMED-order spend: >=5000 PLATINUM, >=2000 GOLD, >=500 SILVER, else
+ *   BRONZE. The seed ships NO orders for members 1-3, so their 90-day spend is 0 and all three
+ *   recalculate to BRONZE at startup. These expectations therefore assert the AAP-correct
+ *   recalculated tier (BRONZE) rather than the stale seed column (which historically read
+ *   GOLD/SILVER). The threshold fixtures that DO exercise SILVER/GOLD/PLATINUM live in the
+ *   Testcontainers integration tests (TierRecalculationIT), which seed the requisite orders.
  */
 
 // Users-service base URL (:8083, context-path /users). Overridable via env for CI; the default
@@ -24,9 +33,13 @@ import { test, expect, Page } from '@playwright/test';
 // is stripped so path concatenation stays clean.
 const USERS_BASE_URL = (process.env.USERS_BASE_URL ?? 'http://localhost:8083/users').replace(/\/+$/, '');
 
+// Names are from the seed; the tier is the value TierRecalculationService assigns at startup.
+// Members 1-3 have no seed orders (0 rolling 90-day spend), so all three recalculate to BRONZE
+// — see the "Tier authority" note above. Both the live users-service API layer and the frontend
+// login-badge layer read this same recalculated tier, so a single value keeps both layers honest.
 const SEED_MEMBERS = [
-  { id: 1, name: 'Jane Smith', tier: 'GOLD' },
-  { id: 2, name: 'Robert Torres', tier: 'SILVER' },
+  { id: 1, name: 'Jane Smith', tier: 'BRONZE' },
+  { id: 2, name: 'Robert Torres', tier: 'BRONZE' },
   { id: 3, name: 'Emily Chen', tier: 'BRONZE' },
 ];
 

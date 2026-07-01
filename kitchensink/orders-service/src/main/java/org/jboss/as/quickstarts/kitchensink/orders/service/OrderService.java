@@ -8,6 +8,7 @@ import java.util.List;
 
 import org.jboss.as.quickstarts.kitchensink.orders.client.MarketplaceClient;
 import org.jboss.as.quickstarts.kitchensink.orders.client.UsersClient;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.EmptyCartException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.NoEligibleVendorException;
 import org.jboss.as.quickstarts.kitchensink.orders.model.Order;
 import org.jboss.as.quickstarts.kitchensink.orders.model.OrderDraftItem;
@@ -54,6 +55,16 @@ public class OrderService {
 
     @Transactional
     public void addToCart(Long memberId, Long productId, int quantity) {
+        // QA Issue 2: validate the draft row's foreign-key targets over HTTP BEFORE persisting, so an
+        // unknown member or product returns a controlled 404 (MemberNotFoundException /
+        // ProductNotFoundException) instead of a raw DataIntegrityViolationException surfacing as an
+        // uncontrolled HTTP 500 with order_draft_items_{member,product}_id_fkey stack traces. Member is
+        // checked first (mirrors submitOrder's validation order), then product. Both are read over the
+        // only legal cross-domain channel -- the HTTP client gateways (boundary rule, AAP 0.7.2) --
+        // since orders-service owns neither the member nor the product entity.
+        usersClient.getMemberTier(memberId);
+        marketplaceClient.verifyProductExists(productId);
+
         OrderDraftItem item = new OrderDraftItem();
         item.setMemberId(memberId);
         item.setProductId(productId);
@@ -69,6 +80,13 @@ public class OrderService {
     /** Non-transactional preview; shares orchestrateOrder with submit for dual-path parity. */
     public OrderPreview previewOrder(Long memberId, String destinationZip, boolean expedite) {
         List<OrderDraftItem> draftItems = orderDraftItemRepository.findByMemberId(memberId);
+        // QA Issue 3: apply the SAME empty-cart guard as submitOrder so the two paths agree. Previously
+        // preview skipped this check and returned a misleading, payable-looking 200 (subtotal 0,
+        // shipping-only total) for an empty cart while submit failed -- an inconsistent contract. An
+        // empty cart is now a controlled 400 (EmptyCartException) on both paths.
+        if (draftItems.isEmpty()) {
+            throw new EmptyCartException("Cart is empty for member " + memberId);
+        }
         return orchestrateOrder(memberId, draftItems, destinationZip, expedite);
     }
 
@@ -78,10 +96,13 @@ public class OrderService {
         //    Done first so a missing member fails before the empty-cart check, preserving proc ordering.
         usersClient.getMemberTier(memberId);
 
-        // 2. Load cart; reject empty (replaces process_order P0004).
+        // 2. Load cart; reject empty (replaces process_order P0004). QA Issue 3: raise the mapped
+        //    EmptyCartException (-> HTTP 400) instead of a raw IllegalStateException (which fell through
+        //    to the controller's generic catch and returned an uncontrolled HTTP 500). previewOrder
+        //    applies the identical guard, so the two paths agree on empty-cart validity.
         List<OrderDraftItem> draftItems = orderDraftItemRepository.findByMemberId(memberId);
         if (draftItems.isEmpty()) {
-            throw new IllegalStateException("Cart is empty for member " + memberId);
+            throw new EmptyCartException("Cart is empty for member " + memberId);
         }
 
         // 3. Compute via the shared routine (all HTTP reads happen here, before any persistence,

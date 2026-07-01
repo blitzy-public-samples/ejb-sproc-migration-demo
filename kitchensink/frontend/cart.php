@@ -90,8 +90,16 @@ require_once __DIR__ . '/includes/header.php';
         </tr>
     </table>
 </div>
-<?php elseif ($preview): ?>
-    <p style="color:#888; margin-bottom:20px;">Your cart is empty or all items have no available vendors.</p>
+<?php elseif ($zip !== ''): ?>
+    <!--
+      Empty-cart / non-payable state (Issue 3 frontend completion).
+      With the empty-cart backend fix, GET .../preview now returns HTTP 400 for an
+      empty cart, so api_get() yields null ($preview === null). Keying the empty-state
+      branch off the submitted ZIP (rather than a truthy $preview) guarantees the
+      empty-cart message still renders after a shipping-estimate request. No order
+      summary and no checkout link render in this state, so the cart is non-payable.
+    -->
+    <p style="color:#888; margin-bottom:20px;" data-testid="cart-empty">Your cart is empty. Add products from the catalog before requesting a shipping estimate.</p>
 <?php endif; ?>
 
 <!-- Preview / shipping form -->

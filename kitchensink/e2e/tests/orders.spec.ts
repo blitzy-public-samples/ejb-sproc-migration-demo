@@ -11,9 +11,14 @@ import { test, expect, Locator } from '@playwright/test';
  *     preview/submit time, so add-to-cart needs no vendor input.
  * A5: preview REQUIRES a ZIP — 27601 is supplied before previewing.
  *
- * Parity (member 1 GOLD + product 1 @ qty 1, ZIP 27601 -> Southeast 0.95/lb), AAP §0.6.1/§0.7.2:
- *   unit price 8.49 x 1.08 = 9.1692 -> $9.17 ; GOLD discount 8% -> $0.73 ;
- *   shipping GREATEST(5.99, 0.95 x 0.55) = $5.99 ; total ~ $14.43.
+ * Parity (member 1 + product 1 @ qty 1, ZIP 27601 -> Southeast 0.95/lb), AAP §0.6.1/§0.7.2:
+ *   unit price 8.49 x 1.08 = 9.1692 -> $9.17 (markup-based, tier-independent) ;
+ *   shipping GREATEST(5.99, 0.95 x 0.55) = $5.99 ;
+ *   discount = tier pct x subtotal. Member 1 recalculates to BRONZE at startup (no seed orders
+ *   -> 0 rolling 90-day spend; see members.spec.ts "Tier authority"), so BRONZE 2% ->
+ *   ROUND(9.1692 x 0.02, 2) = $0.18 and total ~ $14.98. (Were member 1 GOLD, it would be 8% ->
+ *   $0.73 and total ~ $14.43 — hence the checks below assert discount > 0 rather than an exact
+ *   tier-dependent figure.)
  * Robust checks are preferred over hardcoding subtotal/discount (orders-service rounding is
  * authored in parallel): relational invariant (total ~= subtotal - discount + shipping, +/-$0.01),
  * the shipping floor ($5.99), the unit price ($9.17), and discount > 0.
@@ -34,7 +39,7 @@ async function moneyCell(summary: Locator, testids: string[], priceIndex: number
 }
 
 test('order happy path: login, add to cart, preview, submit', async ({ page }) => {
-  // 1) Login as member 1 (Jane Smith, GOLD).
+  // 1) Login as member 1 (Jane Smith; recalculates to BRONZE at startup — see members.spec.ts).
   await page.goto('/frontend/index.php');
   await page.locator('[data-testid="login-member-id"], [data-testid="member-id-input"], #member_id').fill('1');
   await page.locator('[data-testid="login-submit"], form button[type="submit"]').first().click();
@@ -84,7 +89,8 @@ test('order happy path: login, add to cart, preview, submit', async ({ page }) =
 
   // Deterministic: single light item -> shipping floor $5.99.
   expect(shipping).toBeCloseTo(5.99, 2);
-  // GOLD discount applied (> 0). Documented exact value: $0.73.
+  // Tier discount applied (> 0). Member 1 is BRONZE at startup -> 2% -> ~$0.18 at this subtotal
+  // (would be $0.73 if GOLD); asserting > 0 keeps this robust to the recalculated tier.
   expect(discount).toBeGreaterThan(0);
   // Relational invariant (primary, robust): total ~= subtotal - discount + shipping (+/- $0.01).
   expect(Math.abs(total - (subtotal - discount + shipping))).toBeLessThanOrEqual(0.01);

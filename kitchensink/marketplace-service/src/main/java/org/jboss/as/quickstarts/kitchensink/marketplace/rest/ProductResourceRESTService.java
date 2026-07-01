@@ -128,19 +128,32 @@ public class ProductResourceRESTService {
     /**
      * GET /api/products/{id}/price?vendorId=N&qty=N
      * Contract 1 (Pricing): returns the calculated unit price as a BARE BigDecimal JSON number.
-     * Returns 400 when vendorId is absent; 404 when no vendor inventory exists for the
-     * (product, vendor) pair (InventoryNotFoundException, mapped via its own @ResponseStatus).
+     *
+     * <p>Both {@code vendorId} and {@code qty} are <strong>required</strong> (QA Issue 1 / Contract 1
+     * {@code quantity}&rarr;{@code qty} rename, AAP &sect;0.6.2/A4). {@code qty} intentionally has NO
+     * default: a request that omits {@code qty} — for example one that still sends the obsolete
+     * {@code quantity} parameter — is rejected with HTTP 400 rather than silently defaulting to
+     * {@code qty=1} (which previously mispriced legacy callers at the qty-1 unit price). This makes
+     * the contract rename observable at the boundary instead of masking it.</p>
+     *
+     * <p>Returns 400 when {@code vendorId} or {@code qty} is absent, or when {@code qty < 1}; 404 when
+     * no vendor inventory exists for the (product, vendor) pair (InventoryNotFoundException, mapped
+     * via its own @ResponseStatus).</p>
      */
     @GetMapping("/{id}/price")
     public ResponseEntity<BigDecimal> getPrice(
             @PathVariable("id") Long id,
             @RequestParam(name = "vendorId", required = false) Long vendorId,
-            @RequestParam(name = "qty", defaultValue = "1") int qty) {
-        requireValidQty(qty);
+            @RequestParam(name = "qty", required = false) Integer qty) {
         if (vendorId == null) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "vendorId query parameter is required");
         }
+        if (qty == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "qty query parameter is required");
+        }
+        requireValidQty(qty);
         BigDecimal unitPrice = pricingService.calculatePrice(id, vendorId, qty);
         return ResponseEntity.ok(unitPrice);
     }

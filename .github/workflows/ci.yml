@@ -100,6 +100,26 @@ jobs:
       - name: Build and run integration tests (all modules)
         run: mvn -B -ntp -f kitchensink/pom.xml clean install
 
+      # ADVISORY (non-gating) CVE scan of the service runtime base image. All three
+      # Dockerfiles run on the SAME runtime base (eclipse-temurin:17-jre-alpine), so a
+      # single scan covers the production base for every service. QA could not run a
+      # scanner locally (trivy/grype/syft/Docker Scout were unavailable), so this wires
+      # the check into CI where it CAN run. It is deliberately non-gating:
+      # `continue-on-error: true` plus `exit-code: '0'` mean a finding NEVER fails the
+      # build — the refactor's minimal-change scope excludes gating delivery on
+      # third-party base-image CVEs — but the findings surface in the job log for triage.
+      # `ignore-unfixed: true` limits output to CVEs that actually have a fix available.
+      - name: Scan runtime base image for CVEs (advisory)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: eclipse-temurin:17-jre-alpine
+          format: table
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: os,library
+
       # psql client used to seed the live-service database below.
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -159,8 +179,11 @@ jobs:
           cache-dependency-path: kitchensink/e2e/package-lock.json
 
       # PHP for the storefront. Playwright's `webServer` block starts the PHP
-      # built-in server itself (php -S 127.0.0.1:8080 -t ..); we only need PHP on
-      # the runner and must NOT start it manually or set E2E_DISABLE_WEBSERVER.
+      # built-in server itself (php -S 127.0.0.1:8080 -d expose_php=0 -t ..
+      # ../router.php — the router returns a real 404 for unknown paths instead of
+      # the built-in server's index fallback, and expose_php=0 suppresses the
+      # X-Powered-By header); we only need PHP on the runner and must NOT start it
+      # manually or set E2E_DISABLE_WEBSERVER.
       - name: Set up PHP 8.2
         uses: shivammathur/setup-php@v2
         with:

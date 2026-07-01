@@ -63,7 +63,10 @@ export default defineConfig({
     ? {
         // Serve the PHP storefront with kitchensink/ as the document root so that
         // absolute links like /frontend/index.php resolve. Run from e2e/ → `..` = kitchensink/.
-        command: `php -S ${phpHost}:${phpPort} -t ..`,
+        // `router.php` (kitchensink/router.php) returns a real 404 for missing routes
+        // instead of the built-in server's walk-up index fallback (Issue 10), and
+        // `-d expose_php=0` suppresses the X-Powered-By version banner (Issue 9).
+        command: `php -S ${phpHost}:${phpPort} -d expose_php=0 -t .. ../router.php`,
         url: `${FRONTEND_BASE_URL}/frontend/index.php`,
         timeout: 120_000,
         reuseExistingServer: !isCI,

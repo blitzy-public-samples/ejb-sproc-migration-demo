@@ -3,6 +3,7 @@ package org.jboss.as.quickstarts.kitchensink.orders.rest;
 import java.util.List;
 import java.util.Map;
 
+import org.jboss.as.quickstarts.kitchensink.orders.exception.EmptyCartException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.MemberNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.NoEligibleVendorException;
@@ -168,9 +169,11 @@ public class OrderResourceRESTService {
             OrderService.OrderPreview preview = orderService.previewOrder(memberId, zip, expedite);
             return ResponseEntity.ok(preview);
         } catch (MemberNotFoundException | InventoryNotFoundException
-                 | NoEligibleVendorException | ServiceUnavailableException e) {
+                 | NoEligibleVendorException | ServiceUnavailableException
+                 | EmptyCartException e) {
             // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/409/503,
-            // AAP §0.6.2; NoEligibleVendorException -> 409 per review M1). Re-throw so
+            // AAP §0.6.2; NoEligibleVendorException -> 409 per review M1). EmptyCartException -> 400
+            // (QA Issue 3) so preview agrees with submit on empty-cart validity. Re-throw so
             // OrdersRestExceptionHandler (@RestControllerAdvice) maps them, rather than letting the
             // generic catch below flatten them to 500 (QA INC-2 Finding F1).
             throw e;
@@ -206,9 +209,11 @@ public class OrderResourceRESTService {
             Long orderId = orderService.submitOrder(memberId, zip, expedite);
             return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("orderId", orderId));
         } catch (MemberNotFoundException | InventoryNotFoundException
-                 | NoEligibleVendorException | ServiceUnavailableException e) {
+                 | NoEligibleVendorException | ServiceUnavailableException
+                 | EmptyCartException e) {
             // Cross-domain domain exceptions carry their own contractual HTTP status (404/404/409/503,
-            // AAP §0.6.2; NoEligibleVendorException -> 409 per review M1). Re-throw so
+            // AAP §0.6.2; NoEligibleVendorException -> 409 per review M1). EmptyCartException -> 400
+            // (QA Issue 3) so submit agrees with preview on empty-cart validity. Re-throw so
             // OrdersRestExceptionHandler (@RestControllerAdvice) maps them, rather than letting the
             // generic catch below flatten them to 500 (QA INC-2 Finding F1).
             throw e;

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.math.BigDecimal;
 import java.time.Duration;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.InventoryNotFoundException;
+import org.jboss.as.quickstarts.kitchensink.orders.exception.ProductNotFoundException;
 import org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -122,6 +123,28 @@ public class MarketplaceClientImpl implements MarketplaceClient {
         } catch (RestClientException e) {
             throw new ServiceUnavailableException(
                     "marketplace-service is unavailable pricing product " + productId, e);
+        }
+    }
+
+    @Override
+    public void verifyProductExists(Long productId) {
+        try {
+            // Pure existence check (QA Issue 2): read the catalog row and discard the body. A 2xx means
+            // the product exists and an order_draft_items FK to it will hold; a 404 means it does not,
+            // which we surface as a controlled ProductNotFoundException (HTTP 404) BEFORE persisting a
+            // draft row — instead of letting the DB raise a DataIntegrityViolationException (HTTP 500).
+            restClient.get()
+                    .uri("/api/products/{productId}", productId)
+                    .retrieve()
+                    .toBodilessEntity();
+        } catch (HttpClientErrorException.NotFound e) {
+            throw new ProductNotFoundException("Product not found: " + productId, e);
+        } catch (HttpServerErrorException e) {
+            throw new ServiceUnavailableException(
+                    "marketplace-service returned an error verifying product " + productId);
+        } catch (RestClientException e) {
+            throw new ServiceUnavailableException(
+                    "marketplace-service is unavailable verifying product " + productId, e);
         }
     }
 

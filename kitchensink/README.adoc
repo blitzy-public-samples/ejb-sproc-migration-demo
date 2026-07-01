@@ -319,14 +319,25 @@ procedures, then seed data):
 
 [source,bash]
 ----
-createdb kitchensink
-psql -d kitchensink -f db/01_schema.sql
-psql -d kitchensink -f db/02_stored_procedures.sql
-psql -d kitchensink -f db/03_seed_data.sql
+# createdb / psql connect to the local PostgreSQL as the 'postgres' superuser on
+# localhost:5432. Export PGPASSWORD (or rely on your local auth) so the client does not prompt.
+export PGPASSWORD=postgres
+createdb -h localhost -U postgres kitchensink
+psql -h localhost -U postgres -d kitchensink -f db/01_schema.sql
+psql -h localhost -U postgres -d kitchensink -f db/02_stored_procedures.sql
+psql -h localhost -U postgres -d kitchensink -f db/03_seed_data.sql
 ----
 
 NOTE: The stored procedures are loaded only so that legacy parity fixtures exist; the migrated
 Java application never calls them.
+
+NOTE: The seed data ships *no orders*, so each member's rolling 90-day `CONFIRMED`-order spend is
+zero. When `users-service` starts, its `@EventListener(ApplicationReadyEvent)` tier recalculation
+(Section 5) therefore assigns *every* freshly-seeded member the *BRONZE* tier — this recalculated
+value, not the static `tier` column in `03_seed_data.sql`, is what `GET /api/members/{id}/tier`
+returns and what the storefront badge and checkout discount reflect. Higher tiers (SILVER / GOLD /
+PLATINUM) appear only once a member accumulates qualifying 90-day spend; the `TierRecalculationIT`
+integration test seeds such orders to exercise those thresholds.
 
 === Start each service
 
@@ -397,8 +408,9 @@ The integration tests are `@SpringBootTest` tests backed by Testcontainers. Each
 ephemeral `PostgreSQLContainer` seeded from the three `db/*.sql` scripts (`01_schema.sql`,
 `02_stored_procedures.sql`, `03_seed_data.sql`) — the procedures are loaded only as legacy parity
 fixtures and are never invoked by the code under test. The container's JDBC URL is wired into
-Spring via `@DynamicPropertySource`. Cross-service HTTP calls are stubbed with
-`MockRestServiceServer` / WireMock so a service can be tested in isolation.
+Spring via `@DynamicPropertySource`. Cross-service calls are isolated by replacing each client
+gateway interface (`MarketplaceClient`, `UsersClient`, `OrdersClient`) with a Mockito stub via
+Spring Boot's `@MockitoBean`, so a service is tested without its downstream peers running.
 
 Run the Java integration-test suite from `kitchensink/`. The `*IT` tests are bound to the Maven
 Failsafe plugin (`integration-test` / `verify` goals), so use `mvn verify` — a plain `mvn test`
@@ -417,20 +429,37 @@ Parity assertions enforced by the integration tests:
 * *Discount audit* — exactly *one* `discount_audit` row is written per discount calculation,
   *including* non-committing preview calls.
 
-The integration tests live under each owning service: `PricingServiceIT` (marketplace);
-`MemberRegistrationIT` and `TierRecalculationIT` (users); `OrderServiceIT` and `DiscountServiceIT`
-(orders).
+The seven integration tests live under each owning service: `PricingServiceIT` and
+`VendorSelectionServiceIT` (marketplace); `MemberRegistrationIT` and `TierRecalculationIT` (users);
+`OrderServiceIT`, `DiscountServiceIT`, and `ShippingServiceIT` (orders).
 
 === End-to-end tests
 
 A Playwright end-to-end suite lives under `e2e/`. It drives the PHP storefront against the three
-running services. Run it with:
+running services, so *start all three services first* (Section 7). `npm test` runs a `pretest`
+health gate (`wait-on` the three `/actuator/health` URLs) and then Playwright launches the PHP
+storefront itself via its `webServer` block — `php -S 127.0.0.1:8080 -d expose_php=0 -t ..
+../router.php` — so you do *not* start PHP manually for the e2e run. Chromium must be installed
+once before the first run:
 
 [source,bash]
 ----
 cd e2e
-npm install
-npm test
+npm ci                     # or: npm install
+npm run install:browsers   # playwright install --with-deps chromium
+npm test                   # pretest health-gate -> playwright test
+----
+
+To browse the storefront manually (outside the e2e run), start the three services, then serve the
+PHP frontend from `kitchensink/` with the same router. `router.php` returns a real HTTP 404 for
+unknown paths (instead of the built-in server's index fallback) and `-d expose_php=0` suppresses
+the `X-Powered-By` header:
+
+[source,bash]
+----
+# from kitchensink/ , with the three services already running
+php -S 127.0.0.1:8080 -d expose_php=0 -t . router.php
+# then open http://localhost:8080/frontend/index.php
 ----
 
 == 9. Docker & CI

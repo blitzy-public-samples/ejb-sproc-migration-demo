@@ -79,4 +79,29 @@ public interface MarketplaceClient {
      *         if marketplace-service responds with a 5xx status or is unreachable
      */
     BigDecimal getPrice(Long productId, Long vendorId, int qty);
+
+    /**
+     * Verifies that a product exists in the marketplace catalog by reading the marketplace product
+     * endpoint ({@code GET {marketplace.base-url}/api/products/{productId}}).
+     *
+     * <p><strong>Why this exists (QA Issue 2 — add-to-cart error handling).</strong> The cart's
+     * {@code order_draft_items} table has foreign keys to {@code member} and {@code product}; adding a
+     * draft row for a non-existent product previously surfaced as a raw
+     * {@code DataIntegrityViolationException} (HTTP 500 + FK stack traces in the logs). orders-service
+     * owns no {@code Product} entity (boundary rule, AAP &sect;0.7.2), so it validates product
+     * existence over HTTP — the only legal cross-domain channel — <em>before</em> persisting a draft
+     * item, converting an unknown product into a controlled {@link
+     * org.jboss.as.quickstarts.kitchensink.orders.exception.ProductNotFoundException} (HTTP 404).</p>
+     *
+     * <p>This is a pure existence check (the response body is intentionally discarded); it does not
+     * imply that any vendor can price/fulfill the product — that remains {@link #selectBestVendor} /
+     * {@link #getPrice} at orchestrate time.</p>
+     *
+     * @param productId the catalog product id to verify
+     * @throws org.jboss.as.quickstarts.kitchensink.orders.exception.ProductNotFoundException
+     *         if marketplace returns 404 (the product does not exist)
+     * @throws org.jboss.as.quickstarts.kitchensink.orders.exception.ServiceUnavailableException
+     *         if marketplace returns a 5xx error or is unreachable
+     */
+    void verifyProductExists(Long productId);
 }
