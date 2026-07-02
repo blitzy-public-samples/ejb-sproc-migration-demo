@@ -27,6 +27,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.container.ContainerResponseFilter;
+import jakarta.ws.rs.container.PreMatching;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 
@@ -52,6 +53,7 @@ import jakarta.ws.rs.ext.Provider;
  * omitted.</p>
  */
 @Provider
+@PreMatching
 @Priority(Priorities.HEADER_DECORATOR)
 public class CorsFilter implements ContainerRequestFilter, ContainerResponseFilter {
 
@@ -109,6 +111,13 @@ public class CorsFilter implements ContainerRequestFilter, ContainerResponseFilt
      * content type triggers an {@code OPTIONS} preflight that the JAX-RS resources would answer
      * with 405; here we detect it (OPTIONS + {@code Origin} + {@code Access-Control-Request-Method})
      * and abort the chain with a 200 response bearing the CORS headers (only when allowlisted).
+     *
+     * <p>The class is annotated {@link PreMatching}, so this request filter runs BEFORE JAX-RS
+     * resource/method matching. That ordering is essential: {@code MemberResourceRESTService}
+     * declares only {@code @GET}/{@code @POST} and no {@code @OPTIONS} method, so a default
+     * (post-matching) request filter could execute too late &mdash; after matching has already
+     * failed the {@code OPTIONS} request with a 405. Pre-matching guarantees the preflight is
+     * always answered with a 200 and the CORS headers before matching is attempted.</p>
      */
     @Override
     public void filter(ContainerRequestContext requestContext) throws IOException {

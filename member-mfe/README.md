@@ -59,15 +59,24 @@ npm test               # vitest run --coverage  (>= 80% statement coverage enfor
 | `MFE_REST_BASE_URL` | Base URL of the `kitchensink` JAX-RS API the remote calls.         | `http://localhost:8080/kitchensink/rest`    |
 | `MFE_PORT`          | Dev-server port and the origin that serves `remoteEntry.js`.       | `5001`                                       |
 
-These variables are injected **at build time** by Webpack's `DefinePlugin` — there is no
-runtime `.env` loader. To override the defaults, copy the provided template and export the
-values in your shell before running a script:
+These variables are injected **at build time** by Webpack's `DefinePlugin` — there is **no
+runtime `.env` loader**, and no build/dev/test script sources a `.env` file. To override a
+default, **export** the variable in your shell before running a script, or set it **inline** for
+a single command:
 
 ```bash
-cp .env.example .env
-# then edit .env, or export the values inline for a single command:
+# Export for the shell session, then run any script:
+export MFE_PORT=5001
+export MFE_REST_BASE_URL=http://localhost:8080/kitchensink/rest
+npm run dev
+
+# …or set the variables inline for a single command:
 MFE_PORT=5001 MFE_REST_BASE_URL=http://localhost:8080/kitchensink/rest npm run dev
 ```
+
+The committed **`.env.example`** lists the variable names and their defaults **for reference
+only** — it is a template and is **not** read at build or run time (the project has no `dotenv`
+dependency), so editing a local `.env` has no effect on `npm run dev` or `npm run build`.
 
 If you do not set them, the defaults above are used, which target a locally running
 `kitchensink` WAR on `http://localhost:8080`.
