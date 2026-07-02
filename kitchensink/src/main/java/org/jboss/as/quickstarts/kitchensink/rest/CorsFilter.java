@@ -150,7 +150,12 @@ public class CorsFilter implements ContainerRequestFilter, ContainerResponseFilt
         final String origin = requestContext.getHeaderString(ORIGIN);
         if (isAllowedOrigin(origin)) {
             responseContext.getHeaders().putSingle(AC_ALLOW_ORIGIN, origin);
-            responseContext.getHeaders().add(VARY, ORIGIN);
+            // Use putSingle (not add) for Vary so it is emitted EXACTLY ONCE. On an aborted CORS
+            // preflight the request filter's builder has already set Vary: Origin on the response;
+            // this response filter also runs on that aborted response, so an add() would append a
+            // second, duplicate Vary: Origin. putSingle replaces any existing value, keeping a single
+            // Vary: Origin on both preflight and actual (GET/POST) responses.
+            responseContext.getHeaders().putSingle(VARY, ORIGIN);
             responseContext.getHeaders().putSingle(AC_ALLOW_METHODS, ALLOWED_METHODS);
             responseContext.getHeaders().putSingle(AC_ALLOW_HEADERS, ALLOWED_HEADERS);
         }
