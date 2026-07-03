@@ -1,166 +1,196 @@
-/**
- * Unit tests for the registration form (`./MemberRegistrationForm`).
- *
- * This is the write side of the Member screen (Use Case 1) and the most
- * acceptance-criteria-dense component. Strategy: mock ONLY the outermost seam —
- * `../api/membersApi.createMember` — and render the form inside a REAL
- * `QueryClientProvider` (retry:false, mirroring production `QueryProvider`).
- * That exercises the genuine `useRegisterMember` mutation, the real React Hook
- * Form + `zodResolver(memberSchema)` client validation, and the real
- * `../api/errors` typed-error mapping end-to-end — nothing about the component's
- * behavior is stubbed.
- *
- * Acceptance criteria covered:
- *   #1 success -> `createMember` called with the payload, form clears (reset).
- *   #2 400 ValidationError -> per-field errors from the server field map.
- *   #3 409 DuplicateEmailError -> duplicate-email message on the email field.
- *   plus: client validation blocks an invalid submit (no API call), a generic
- *   `ApiError` shows in the form-level region, and an unexpected error shows the
- *   generic fallback.
- *
- * `retry: false` is essential: TanStack Query v5 otherwise retries mutations
- * with exponential backoff, so error assertions would not resolve promptly.
- * Vitest globals are enabled via vitest.config.ts (`globals: true`).
- */
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-
-import { createMember } from '../api/membersApi';
-import { ApiError, DuplicateEmailError, ValidationError } from '../api/errors';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemberRegistrationForm } from './MemberRegistrationForm';
+import { ApiError, DuplicateEmailError, ValidationError } from '../api/errors';
 
-// Mock the API module: `createMember` is driven per-test; `getMembers` is stubbed
-// only so the module mock is complete (this component never calls it).
-vi.mock('../api/membersApi', () => ({
-  createMember: vi.fn(),
-  getMembers: vi.fn(),
+/**
+ * The registration form is a presentational component whose collaborator is the
+ * `useRegisterMember` mutation hook. We mock that hook so we can drive the
+ * per-call `onSuccess` / `onError` callbacks deterministically and toggle the
+ * `isPending` flag — this isolates the component's own logic (the load-bearing
+ * `instanceof` error-discrimination chain, the reset-on-success behaviour and
+ * the client-side Zod validation gate) from the network / query stack.
+ */
+const { mutateMock, mutationState } = vi.hoisted(() => ({
+  mutateMock: vi.fn(),
+  mutationState: { isPending: false },
 }));
 
-const mockedCreateMember = vi.mocked(createMember);
+vi.mock('../hooks/useRegisterMember', () => ({
+  useRegisterMember: () => ({
+    mutate: mutateMock,
+    isPending: mutationState.isPending,
+  }),
+}));
 
-/** A fresh no-retry QueryClient per render, matching the production provider. */
-function makeQueryClient(): QueryClient {
-  return new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
-    },
-  });
+/** Fills the three fields with values that satisfy the client Zod schema. */
+async function fillValidForm(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText('Name'), 'Jane Doe');
+  await user.type(screen.getByLabelText('Email'), 'jane@example.com');
+  await user.type(screen.getByLabelText('Phone'), '1234567890');
 }
 
-function renderForm() {
-  return render(
-    <QueryClientProvider client={makeQueryClient()}>
-      <MemberRegistrationForm />
-    </QueryClientProvider>,
-  );
-}
-
-const validInput = {
-  name: 'Jane Doe',
-  email: 'jane@example.com',
-  phoneNumber: '1234567890',
-};
-
-/** Types valid values into all three fields (passes client-side Zod validation). */
-async function fillValid(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  await user.type(screen.getByLabelText('Name'), validInput.name);
-  await user.type(screen.getByLabelText('Email'), validInput.email);
-  await user.type(screen.getByLabelText('Phone'), validInput.phoneNumber);
-}
+const input = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
 
 beforeEach(() => {
+  mutateMock.mockReset();
+  mutationState.isPending = false;
+});
+
+afterEach(() => {
   vi.clearAllMocks();
 });
 
 describe('MemberRegistrationForm', () => {
-  it('blocks an invalid submit with a client-side validation error and calls no API', async () => {
-    const user = userEvent.setup();
-    renderForm();
+  it('renders the registration form with heading, three labelled fields and the Register button', () => {
+    render(<MemberRegistrationForm />);
 
-    // A name containing digits violates the Zod pattern (mirrors the server
-    // @Pattern("[^0-9]*")). The other fields are valid so only `name` fails.
-    await user.type(screen.getByLabelText('Name'), 'John123');
-    await user.type(screen.getByLabelText('Email'), validInput.email);
-    await user.type(screen.getByLabelText('Phone'), validInput.phoneNumber);
-    await user.click(screen.getByRole('button', { name: 'Register' }));
+    expect(
+      screen.getByRole('heading', { name: 'Member Registration' }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Name')).toBeInTheDocument();
+    expect(screen.getByLabelText('Email')).toBeInTheDocument();
+    expect(screen.getByLabelText('Phone')).toBeInTheDocument();
 
-    expect(await screen.findByText('Must not contain numbers')).toBeInTheDocument();
-    // handleSubmit must NOT invoke the mutation when Zod validation fails.
-    expect(mockedCreateMember).not.toHaveBeenCalled();
+    const button = screen.getByRole('button', { name: 'Register' });
+    expect(button).toBeEnabled();
+    // No error regions on first render.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('submits valid input and clears the form on success (acceptance #1)', async () => {
-    mockedCreateMember.mockResolvedValue(undefined);
+  // Acceptance criterion #1 — successful registration clears the form.
+  it('submits valid input to the mutation and resets the form on success', async () => {
     const user = userEvent.setup();
-    renderForm();
+    mutateMock.mockImplementation((_values, options) => {
+      options?.onSuccess?.();
+    });
 
-    await fillValid(user);
+    render(<MemberRegistrationForm />);
+    await fillValidForm(user);
     await user.click(screen.getByRole('button', { name: 'Register' }));
 
-    await waitFor(() => expect(mockedCreateMember).toHaveBeenCalledTimes(1));
-    // TanStack Query v5 passes a second mutation-context argument to the
-    // mutationFn; `createMember` ignores it, so assert only the payload (arg 0).
-    expect(mockedCreateMember.mock.calls[0]?.[0]).toEqual(validInput);
-
-    // On success the form resets to its empty defaultValues.
-    await waitFor(() => expect(screen.getByLabelText('Name')).toHaveValue(''));
-    expect(screen.getByLabelText('Email')).toHaveValue('');
-    expect(screen.getByLabelText('Phone')).toHaveValue('');
-  });
-
-  it('maps a 400 ValidationError to per-field errors (acceptance #2)', async () => {
-    mockedCreateMember.mockRejectedValue(
-      new ValidationError({
-        email: 'must be a well-formed email address',
-        name: 'size must be between 1 and 25',
+    expect(mutateMock).toHaveBeenCalledTimes(1);
+    expect(mutateMock).toHaveBeenCalledWith(
+      { name: 'Jane Doe', email: 'jane@example.com', phoneNumber: '1234567890' },
+      expect.objectContaining({
+        onSuccess: expect.any(Function),
+        onError: expect.any(Function),
       }),
     );
-    const user = userEvent.setup();
-    renderForm();
 
-    await fillValid(user);
+    // reset() ≙ initNewMember(): all three fields return to empty strings.
+    await waitFor(() => {
+      expect(input('Name').value).toBe('');
+      expect(input('Email').value).toBe('');
+      expect(input('Phone').value).toBe('');
+    });
+  });
+
+  // Acceptance criterion #2 — a server 400 field-map populates per-field errors.
+  it('maps a ValidationError field-map onto per-field error messages', async () => {
+    const user = userEvent.setup();
+    mutateMock.mockImplementation((_values, options) => {
+      options?.onError?.(
+        new ValidationError({
+          name: 'size must be between 1 and 25',
+          email: 'must be a well-formed email address',
+          // Empty message must be skipped by the `if (message)` guard.
+          phoneNumber: '',
+        }),
+      );
+    });
+
+    render(<MemberRegistrationForm />);
+    await fillValidForm(user);
     await user.click(screen.getByRole('button', { name: 'Register' }));
 
     expect(
-      await screen.findByText('must be a well-formed email address'),
+      await screen.findByText('size must be between 1 and 25'),
     ).toBeInTheDocument();
-    expect(screen.getByText('size must be between 1 and 25')).toBeInTheDocument();
+    expect(
+      screen.getByText('must be a well-formed email address'),
+    ).toBeInTheDocument();
+    // The empty-string phone message was skipped, so no third field error.
+    expect(screen.getAllByRole('alert')).toHaveLength(2);
   });
 
-  it('maps a 409 DuplicateEmailError to the email field (acceptance #3)', async () => {
-    mockedCreateMember.mockRejectedValue(new DuplicateEmailError('Email taken'));
+  // Acceptance criterion #3 — a 409 duplicate email surfaces on the email field.
+  it('shows the duplicate-email message on the email field for a DuplicateEmailError', async () => {
     const user = userEvent.setup();
-    renderForm();
+    mutateMock.mockImplementation((_values, options) => {
+      options?.onError?.(new DuplicateEmailError('Email taken'));
+    });
 
-    await fillValid(user);
+    render(<MemberRegistrationForm />);
+    await fillValidForm(user);
     await user.click(screen.getByRole('button', { name: 'Register' }));
 
     expect(await screen.findByText('Email taken')).toBeInTheDocument();
+    // Only the email field carries an error.
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
   });
 
-  it('shows a form-level error for a generic ApiError', async () => {
-    mockedCreateMember.mockRejectedValue(new ApiError('Service unavailable', 400));
+  // Generic ApiError ({ error }) is shown in the form-level region.
+  it('renders a generic ApiError message in the form-level error region', async () => {
     const user = userEvent.setup();
-    renderForm();
+    mutateMock.mockImplementation((_values, options) => {
+      options?.onError?.(
+        new ApiError('Registration failed. See server log for more information', 400),
+      );
+    });
 
-    await fillValid(user);
+    render(<MemberRegistrationForm />);
+    await fillValidForm(user);
     await user.click(screen.getByRole('button', { name: 'Register' }));
 
-    expect(await screen.findByText('Service unavailable')).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'Registration failed. See server log for more information',
+      ),
+    ).toBeInTheDocument();
   });
 
-  it('shows the generic fallback message for an unexpected error', async () => {
-    mockedCreateMember.mockRejectedValue(new Error('boom'));
+  // Unexpected (non-typed) errors fall back to the generic message.
+  it('falls back to a generic message for an unexpected non-typed error', async () => {
     const user = userEvent.setup();
-    renderForm();
+    mutateMock.mockImplementation((_values, options) => {
+      options?.onError?.(new Error('network unreachable'));
+    });
 
-    await fillValid(user);
+    render(<MemberRegistrationForm />);
+    await fillValidForm(user);
     await user.click(screen.getByRole('button', { name: 'Register' }));
 
     expect(
       await screen.findByText('Registration failed. Please try again.'),
     ).toBeInTheDocument();
+  });
+
+  // Client-side Zod validation blocks submission (mutation never called).
+  it('blocks submission and shows Zod validation messages for invalid input', async () => {
+    const user = userEvent.setup();
+
+    render(<MemberRegistrationForm />);
+    await user.type(screen.getByLabelText('Name'), 'John123');
+    await user.type(screen.getByLabelText('Email'), 'not-an-email');
+    await user.type(screen.getByLabelText('Phone'), '12');
+    await user.click(screen.getByRole('button', { name: 'Register' }));
+
+    expect(await screen.findByText('Must not contain numbers')).toBeInTheDocument();
+    expect(screen.getByText('Invalid email address')).toBeInTheDocument();
+    expect(
+      screen.getByText('Phone number must be between 10 and 12 digits'),
+    ).toBeInTheDocument();
+    expect(mutateMock).not.toHaveBeenCalled();
+  });
+
+  // The submit button is disabled while the mutation is pending.
+  it('disables the Register button while the mutation is pending', () => {
+    mutationState.isPending = true;
+
+    render(<MemberRegistrationForm />);
+
+    expect(screen.getByRole('button', { name: 'Register' })).toBeDisabled();
   });
 });
