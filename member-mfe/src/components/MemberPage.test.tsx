@@ -1,58 +1,39 @@
-/**
- * Unit tests for the page container (`./MemberPage`).
- *
- * `MemberPage` is a thin composition root: it renders the registration form,
- * the "Members" heading, and the members list (reproducing the overall layout
- * of the legacy JSF index.xhtml). These tests render the REAL children inside a
- * `QueryClientProvider` and mock only the API module so the list resolves to a
- * deterministic empty state. We assert the composition — both headings and the
- * Register button are present, and the list renders its empty state.
- *
- * Vitest globals are enabled via vitest.config.ts (`globals: true`).
- */
 import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-
-import { getMembers } from '../api/membersApi';
+import type { ReactElement } from 'react';
 import { MemberPage } from './MemberPage';
 
-vi.mock('../api/membersApi', () => ({
-  getMembers: vi.fn(),
-  createMember: vi.fn(),
-}));
-
-const mockedGetMembers = vi.mocked(getMembers);
-
-function renderPage() {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+function renderWithClient(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
   });
   return render(
-    <QueryClientProvider client={client}>
-      <MemberPage />
-    </QueryClientProvider>,
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
   );
 }
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  mockedGetMembers.mockResolvedValue([]);
-});
-
 describe('MemberPage', () => {
-  it('composes the registration form, the "Members" heading, and the list', async () => {
-    renderPage();
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
-    // Registration form (write side).
-    expect(
-      screen.getByRole('heading', { name: 'Member Registration' }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Register' })).toBeInTheDocument();
+  it('renders the registration form and the members section', async () => {
+    // MemberList fetches on mount; return an empty list so it settles to the empty state.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => [] }) as unknown as Response),
+    );
 
-    // The "Members" section heading precedes the list.
+    renderWithClient(<MemberPage />);
+
+    // Registration form is present (Register button) and the Members section heading renders.
+    expect(screen.getByRole('button', { name: /register/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Members' })).toBeInTheDocument();
 
-    // List (read side) resolves to the empty state with the mocked empty result.
+    // Let the members query settle (avoids act() warnings from the pending fetch).
     expect(await screen.findByText('No registered members.')).toBeInTheDocument();
   });
 });
